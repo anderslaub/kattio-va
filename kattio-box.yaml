@@ -1,0 +1,699 @@
+---
+# Kattio - an expressive cat face voice assistant for the ESP32-S3-BOX-3
+#
+#  * The face is drawn procedurally (anti-aliased vector shapes, no bitmaps) by the local
+#    `kattio_face` component and reacts to the voice assistant state.
+#  * On-device wake word "Hey Kattio" (microWakeWord) + "Stop" during multi-turn conversations.
+#  * Voice enhancer between the media player and the speaker: EQ for the tiny speaker,
+#    loudness boost with limiter, and lip-sync level metering.
+#
+# Hardware note: on the BOX-3 the microphone and the speaker share one I2S bus, so the mic
+# can't listen while the speaker plays. Tap the screen to interrupt the cat while it talks.
+
+substitutions:
+  name: cat-in-a-box-1
+  friendly_name: Cat-in-a-Box 1
+  wake_word_model: wakewords/hey_kattio/esphome/hey_kattio.json
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.4.0
+  project:
+    name: kattio.cat-box
+    version: "1.0.0"
+
+esp32:
+  board: esp32s3box
+  flash_size: 16MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240: "y"
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+external_components:
+  - source:
+      type: local
+      path: components
+
+logger:
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  on_client_connected:
+    - lambda: id(face).set_connected(true);
+  on_client_disconnected:
+    - lambda: id(face).set_connected(false);
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Cat-in-a-Box 1 Fallback"
+    password: !secret fallback_ap_password
+  on_disconnect:
+    - lambda: id(face).set_connected(false);
+
+captive_portal:
+
+# ---------------------------------------------------------------------------------------------
+# The face
+# ---------------------------------------------------------------------------------------------
+
+spi:
+  - id: spi_bus
+    clk_pin: 7
+    mosi_pin: 6
+
+display:
+  - platform: mipi_spi
+    id: s3_box_lcd
+    model: S3BOX
+    invert_colors: false
+    data_rate: 40MHz
+    cs_pin: 5
+    dc_pin: 4
+    reset_pin:
+      number: 48
+      inverted: true
+    update_interval: never
+    auto_clear_enabled: false
+    # The kattio_face component writes straight to the panel from its own task.
+    lambda: |-
+      // intentionally empty
+
+kattio_face:
+  id: face
+  display_id: s3_box_lcd
+  speaker_id: voice_out
+  fps: 30
+  resting_fps: 12
+  sleep_timeout: 10min
+
+output:
+  - platform: ledc
+    pin: GPIO47
+    id: backlight_output
+
+light:
+  - platform: monochromatic
+    id: backlight
+    name: Screen
+    icon: "mdi:television"
+    entity_category: config
+    output: backlight_output
+    restore_mode: RESTORE_DEFAULT_ON
+    default_transition_length: 600ms
+
+# ---------------------------------------------------------------------------------------------
+# Audio
+# ---------------------------------------------------------------------------------------------
+
+i2c:
+  - id: i2c_bus
+    scl: GPIO18
+    sda: GPIO8
+
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin:
+      number: GPIO45
+      ignore_strapping_warning: true
+    i2s_bclk_pin: GPIO17
+    i2s_mclk_pin: GPIO2
+
+audio_adc:
+  - platform: es7210
+    i2c_id: i2c_bus
+    id: es7210_adc
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+audio_dac:
+  - platform: es8311
+    i2c_id: i2c_bus
+    id: es8311_dac
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+microphone:
+  - platform: i2s_audio
+    id: box_mic
+    sample_rate: 16000
+    i2s_din_pin: GPIO16
+    bits_per_sample: 16bit
+    adc_type: external
+
+speaker:
+  # The physical speaker (ES8311 DAC + NS4150 amplifier)
+  - platform: i2s_audio
+    id: box_speaker
+    i2s_dout_pin: GPIO15
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: left
+    audio_dac: es8311_dac
+    buffer_duration: 150ms
+  # EQ + limiter + lip-sync metering in front of it
+  - platform: kattio_face
+    id: voice_out
+    output_speaker: box_speaker
+    highpass: 170Hz
+    presence: 3.0
+    loudness_boost: 4.0
+
+media_player:
+  - platform: speaker
+    name: None
+    id: speaker_media_player
+    # ES8311: 0.75 = 0 dB, above that is digital gain that clips. Keep the limiter the last word.
+    volume_min: 0.45
+    volume_max: 0.75
+    announcement_pipeline:
+      speaker: voice_out
+      format: FLAC
+      sample_rate: 48000
+      num_channels: 1  # the BOX-3 has a single speaker
+    files:
+      - id: timer_finished_sound
+        file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+    on_announcement:
+      # The mic and speaker share the I2S bus: release the mic before playing
+      - if:
+          condition:
+            microphone.is_capturing:
+          then:
+            - micro_wake_word.stop:
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - lambda: |-
+                if (id(face).get_mood() != kattio::MOOD_ALARM) id(face).set_mood(kattio::MOOD_SPEAK);
+    on_idle:
+      - if:
+          condition:
+            not:
+              voice_assistant.is_running:
+          then:
+            - lambda: |-
+                if (id(face).get_mood() == kattio::MOOD_SPEAK) id(face).set_mood(kattio::MOOD_IDLE);
+            - script.execute: start_wake_word
+
+# ---------------------------------------------------------------------------------------------
+# Wake words and voice assistant
+# ---------------------------------------------------------------------------------------------
+
+micro_wake_word:
+  id: mww
+  models:
+    - model: ${wake_word_model}
+      id: hey_kattio
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      id: stop
+      internal: true
+  vad:
+  on_wake_word_detected:
+    - if:
+        condition:
+          lambda: return wake_word == "Stop";
+        then:
+          - script.execute: handle_stop_word
+        else:
+          - if:
+              condition:
+                switch.is_on: timer_ringing
+              then:
+                - switch.turn_off: timer_ringing
+              else:
+                - lambda: |-
+                    id(chat_mode) = false;
+                    id(multi_turn) = false;
+                    id(face).set_mood(kattio::MOOD_WAKE);
+                - voice_assistant.start:
+                    wake_word: !lambda return wake_word;
+
+voice_assistant:
+  id: va
+  microphone: box_mic
+  media_player: speaker_media_player
+  micro_wake_word: mww
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 2.0
+  on_listening:
+    - lambda: id(face).set_mood(kattio::MOOD_LISTEN);
+    # Follow-up question (multi-turn): listen for "stop" alongside the request
+    - if:
+        condition:
+          lambda: return id(multi_turn);
+        then:
+          - micro_wake_word.disable_model: hey_kattio
+          - micro_wake_word.enable_model: stop
+          - micro_wake_word.start:
+  on_stt_vad_end:
+    - lambda: id(face).set_mood(kattio::MOOD_THINK);
+    - script.execute: release_mic_for_speaker
+  on_stt_end:
+    - script.execute: release_mic_for_speaker
+    # "...let's talk" switches on chat mode: keep listening after every answer until "stop" or silence
+    - lambda: |-
+        std::string t = x;
+        for (auto &ch : t) ch = (char) tolower((unsigned char) ch);
+        // normalise typographic apostrophes
+        size_t pos;
+        while ((pos = t.find("\xE2\x80\x99")) != std::string::npos) t.replace(pos, 3, "'");
+        static const char *const TRIGGERS[] = {"let's talk", "lets talk", "let us talk", "lad os snakke",
+                                               "lad os tale"};
+        for (auto *trig : TRIGGERS) {
+          if (t.find(trig) != std::string::npos) {
+            if (!id(chat_mode)) ESP_LOGI("kattio", "Chat mode on");
+            id(chat_mode) = true;
+          }
+        }
+        // Voice volume control, applied right away so the reply already plays at the new level
+        static const char *const LOUDER[] = {"speak louder", "talk louder", "speak up", "louder please",
+                                             "tal højere", "snak højere"};
+        static const char *const SOFTER[] = {"lower your voice", "speak softer", "speak quieter", "talk quieter",
+                                             "speak lower", "tal lavere", "snak lavere"};
+        float step = 0;
+        for (auto *w : LOUDER)
+          if (t.find(w) != std::string::npos) step = 0.15f;
+        for (auto *w : SOFTER)
+          if (t.find(w) != std::string::npos) step = -0.15f;
+        if (step != 0) {
+          float v = std::max(0.05f, std::min(1.0f, id(speaker_media_player).volume + step));
+          ESP_LOGI("kattio", "Voice volume %s -> %.2f", step > 0 ? "up" : "down", v);
+          id(speaker_media_player).make_call().set_volume(v).perform();
+        }
+  on_intent_progress:
+    - if:
+        condition:
+          # A non-empty x means a streaming TTS response has started
+          lambda: return !x.empty();
+        then:
+          - lambda: id(face).set_mood(kattio::MOOD_SPEAK);
+  on_tts_start:
+    - lambda: id(face).set_mood(kattio::MOOD_SPEAK);
+  on_end:
+    - script.execute: after_run
+  on_error:
+    - if:
+        condition:
+          lambda: return code != "duplicate_wake_up_detected";
+        then:
+          - lambda: |-
+              if (code == "stt-no-text-recognized") {
+                // Nobody said anything. In a follow-up that's just boring, otherwise confusing.
+                id(face).set_mood(id(multi_turn) ? kattio::MOOD_BORED : kattio::MOOD_CONFUSED);
+              } else {
+                id(face).set_mood(kattio::MOOD_ERROR);
+              }
+              id(chat_mode) = false;
+  on_client_connected:
+    - lambda: id(face).set_connected(true);
+    - script.execute: start_wake_word
+  on_client_disconnected:
+    - lambda: id(face).set_connected(false);
+    - micro_wake_word.stop:
+  on_timer_started:
+    - script.execute: update_timer
+  on_timer_updated:
+    - script.execute: update_timer
+  on_timer_cancelled:
+    - script.execute: update_timer
+  on_timer_tick:
+    - script.execute: update_timer
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+
+script:
+  # (Re)start listening for "Hey Kattio" with the normal model set
+  - id: start_wake_word
+    then:
+      - micro_wake_word.disable_model: stop
+      - micro_wake_word.enable_model: hey_kattio
+      - if:
+          condition:
+            and:
+              - switch.is_off: mute
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing:
+              - not:
+                  micro_wake_word.is_running:
+          then:
+            - micro_wake_word.start:
+
+  # Stop the wake word engine so the speaker can take the shared I2S bus
+  - id: release_mic_for_speaker
+    then:
+      - if:
+          condition:
+            micro_wake_word.is_running:
+          then:
+            - micro_wake_word.stop:
+
+  # Runs when an assist pipeline run ends (the TTS response may still be playing)
+  - id: after_run
+    mode: restart
+    then:
+      - wait_until:
+          condition:
+            media_player.is_announcing:
+          timeout: 0.6s
+      - wait_until:
+          condition:
+            and:
+              - not:
+                  media_player.is_announcing:
+              - not:
+                  speaker.is_playing: box_speaker
+          timeout: 3min
+      # Give the voice assistant a moment to continue the conversation (multi-turn)
+      - delay: 400ms
+      - if:
+          condition:
+            voice_assistant.is_running:
+          then:
+            # The assistant asked a follow-up question: back to green/listening (on_listening)
+            - lambda: id(multi_turn) = true;
+          else:
+            - if:
+                condition:
+                  lambda: return id(chat_mode) && !id(mute).state;
+                then:
+                  # Chat mode: listen again (same conversation id, so the context carries over)
+                  - lambda: id(multi_turn) = true;
+                  - voice_assistant.start:
+                else:
+                  - script.execute: end_conversation
+
+  - id: end_conversation
+    then:
+      - lambda: |-
+          id(multi_turn) = false;
+          id(chat_mode) = false;
+          auto m = id(face).get_mood();
+          if (m == kattio::MOOD_SPEAK || m == kattio::MOOD_LISTEN || m == kattio::MOOD_THINK ||
+              m == kattio::MOOD_WAKE) {
+            id(face).set_mood(kattio::MOOD_IDLE);
+          }
+      - script.execute: start_wake_word
+
+  # "Stop" heard during a follow-up: end the conversation with a sigh
+  - id: handle_stop_word
+    then:
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - switch.turn_off: timer_ringing
+          else:
+            - lambda: |-
+                id(multi_turn) = false;
+                id(chat_mode) = false;
+                id(face).set_mood(kattio::MOOD_BORED);
+            - voice_assistant.stop:
+            - wait_until:
+                condition:
+                  not:
+                    voice_assistant.is_running:
+                timeout: 3s
+            - script.execute: start_wake_word
+
+  # Screen tap: stop alarms, interrupt the cat while it talks, or pet it
+  - id: on_tap
+    then:
+      - if:
+          condition:
+            switch.is_on: timer_ringing
+          then:
+            - switch.turn_off: timer_ringing
+          else:
+            - if:
+                condition:
+                  lambda: return id(face).get_mood() == kattio::MOOD_SPEAK;
+                then:
+                  - lambda: |-
+                      id(multi_turn) = false;
+                      id(chat_mode) = false;
+                  - voice_assistant.stop:
+                  - media_player.stop:
+                      announcement: true
+                  - lambda: id(face).set_mood(kattio::MOOD_BORED);
+                else:
+                  - lambda: id(face).poke();
+
+  # Push to talk
+  - id: push_to_talk
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_off: mute
+              - not:
+                  voice_assistant.is_running:
+          then:
+            - if:
+                condition:
+                  media_player.is_announcing:
+                then:
+                  - media_player.stop:
+                      announcement: true
+            - micro_wake_word.stop:
+            - lambda: |-
+                id(chat_mode) = false;
+                id(multi_turn) = false;
+                id(face).set_mood(kattio::MOOD_WAKE);
+            - voice_assistant.start:
+
+  # Timer progress bar along the bottom of the screen
+  - id: update_timer
+    then:
+      - lambda: |-
+          const auto &timers = id(va).get_timers();
+          bool found = false;
+          float frac = 0;
+          bool running = false;
+          uint32_t best = UINT32_MAX;
+          for (const auto &t : timers) {
+            if (t.seconds_left < best || (t.is_active && !running)) {
+              best = t.seconds_left;
+              frac = t.total_seconds > 0 ? (float) t.seconds_left / (float) t.total_seconds : 0;
+              running = t.is_active;
+              found = true;
+            }
+          }
+          id(face).set_timer(found, frac, running);
+
+globals:
+  - id: chat_mode
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: multi_turn
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+# ---------------------------------------------------------------------------------------------
+# Controls
+# ---------------------------------------------------------------------------------------------
+
+touchscreen:
+  - platform: gt911
+    id: touch
+    i2c_id: i2c_bus
+    interrupt_pin: GPIO3
+    display: s3_box_lcd
+    on_touch:
+      - script.execute: on_tap
+
+binary_sensor:
+  # Top-left button: stop a ringing timer; hold 10s for factory reset
+  - platform: gpio
+    pin:
+      number: GPIO0
+      ignore_strapping_warning: true
+      mode: INPUT_PULLUP
+      inverted: true
+    id: top_button
+    internal: true
+    on_multi_click:
+      - timing:
+          - ON for at least 50ms
+          - OFF for at least 50ms
+        then:
+          - if:
+              condition:
+                switch.is_on: timer_ringing
+              then:
+                - switch.turn_off: timer_ringing
+              else:
+                - script.execute: push_to_talk
+      - timing:
+          - ON for at least 10s
+        then:
+          - button.press: factory_reset_btn
+  # The red "home" circle under the screen: push to talk
+  - platform: gt911
+    id: home_button
+    gt911_id: touch
+    index: 0
+    internal: true
+    on_press:
+      - script.execute: push_to_talk
+  # Dim the screen while the cat sleeps
+  - platform: template
+    id: sleeping
+    name: Sleeping
+    icon: "mdi:sleep"
+    lambda: return id(face).is_sleeping();
+    on_press:
+      - light.turn_on:
+          id: backlight
+          brightness: 35%
+          transition_length: 3s
+    on_release:
+      - light.turn_on:
+          id: backlight
+          brightness: 100%
+          transition_length: 300ms
+
+button:
+  - platform: factory_reset
+    id: factory_reset_btn
+    internal: true
+  - platform: template
+    name: Pet the cat
+    icon: "mdi:cat"
+    on_press:
+      - lambda: id(face).poke();
+
+switch:
+  - platform: gpio
+    name: Speaker Enable
+    pin:
+      number: GPIO46
+      ignore_strapping_warning: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    disabled_by_default: true
+  - platform: template
+    name: Mute
+    id: mute
+    icon: "mdi:microphone-off"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    on_turn_on:
+      - microphone.mute:
+      - micro_wake_word.stop:
+      - lambda: id(face).set_muted(true);
+    on_turn_off:
+      - microphone.unmute:
+      - lambda: id(face).set_muted(false);
+      - script.execute: start_wake_word
+  - platform: template
+    name: Voice enhancer
+    id: voice_enhancer
+    icon: "mdi:tune-vertical"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    on_turn_on:
+      - lambda: id(voice_out).set_enabled(true);
+    on_turn_off:
+      - lambda: id(voice_out).set_enabled(false);
+  - platform: template
+    id: timer_ringing
+    optimistic: true
+    internal: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+      - lambda: |-
+          id(speaker_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_OFF)
+            .set_announcement(true)
+            .perform();
+          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
+      - media_player.stop:
+          announcement: true
+      - lambda: id(face).set_mood(kattio::MOOD_IDLE);
+    on_turn_on:
+      - micro_wake_word.stop:
+      - lambda: |-
+          id(face).set_mood(kattio::MOOD_ALARM);
+          id(speaker_media_player)
+            ->make_call()
+            .set_command(media_player::MediaPlayerCommand::MEDIA_PLAYER_COMMAND_REPEAT_ONE)
+            .set_announcement(true)
+            .perform();
+          id(speaker_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 1000);
+      - media_player.speaker.play_on_device_media_file:
+          media_file: timer_finished_sound
+          announcement: true
+      - delay: 15min
+      - switch.turn_off: timer_ringing
+
+number:
+  - platform: template
+    name: Loudness boost
+    id: loudness_boost
+    icon: "mdi:volume-plus"
+    entity_category: config
+    unit_of_measurement: dB
+    min_value: 0
+    max_value: 12
+    step: 1
+    initial_value: 4
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: id(voice_out).set_boost_db(x);
+  - platform: template
+    name: Sleep after
+    id: sleep_after
+    icon: "mdi:sleep"
+    entity_category: config
+    unit_of_measurement: min
+    min_value: 1
+    max_value: 120
+    step: 1
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: id(face).set_sleep_timeout((uint32_t) (x * 60000));
+
+text_sensor:
+  - platform: template
+    name: Mood
+    icon: "mdi:cat"
+    entity_category: diagnostic
+    update_interval: 1s
+    lambda: |-
+      static const char *const NAMES[] = {"booting", "idle", "sleeping", "waking", "listening", "thinking",
+                                          "speaking", "bored", "error", "muted", "offline", "alarm",
+                                          "happy", "confused"};
+      auto m = (unsigned) id(face).get_mood();
+      return std::string(m < sizeof(NAMES) / sizeof(NAMES[0]) ? NAMES[m] : "?");
