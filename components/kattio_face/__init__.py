@@ -13,6 +13,7 @@ CONF_SPEAKER_ID = "speaker_id"
 CONF_FPS = "fps"
 CONF_RESTING_FPS = "resting_fps"
 CONF_SLEEP_TIMEOUT = "sleep_timeout"
+CONF_SNAP_ONE_IN = "snap_one_in"
 
 kattio_face_ns = cg.esphome_ns.namespace("kattio_face")
 KattioFace = kattio_face_ns.class_("KattioFace", cg.Component)
@@ -31,6 +32,8 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Optional(
             CONF_SLEEP_TIMEOUT, default="10min"
         ): cv.positive_time_period_milliseconds,
+        # When petted, the cat snaps at 1 in this many pets (0 = never)
+        cv.Optional(CONF_SNAP_ONE_IN, default=6): cv.int_range(min=0, max=1000),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -45,3 +48,4 @@ async def to_code(config):
         cg.add(var.set_level_source(spk))
     cg.add(var.set_fps(config[CONF_FPS], config[CONF_RESTING_FPS]))
     cg.add(var.set_sleep_timeout(config[CONF_SLEEP_TIMEOUT]))
+    cg.add(var.set_snap_one_in(config[CONF_SNAP_ONE_IN]))

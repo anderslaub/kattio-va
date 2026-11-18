@@ -28,6 +28,9 @@ enum Mood : uint8_t {
   MOOD_ALARM,      // timer finished: ringing, wide eyes, open mouth
   MOOD_HAPPY,      // petted via touchscreen: ^^ eyes, blush, hearts -> resting
   MOOD_CONFUSED,   // nothing heard: head tilt + "?" -> resting
+  MOOD_SNAP,       // petted once too often: angry eyes, snarl, growl shake, claw marks on the screen -> resting
+  MOOD_WORK,       // busy with a task in the background: teal, focused eyes on a spinning cog
+  MOOD_READY,      // the answer is on its way (TTS is being generated): blue, mouth ready -> SPEAK on first sound
   MOOD_COUNT
 };
 
@@ -115,7 +118,13 @@ class FaceEngine {
     timer_frac_ = fraction;
     timer_running_ = running;
   }
-  void poke();  // user interaction (touch): wake from sleep / pet
+  // User interaction (touch): wake from sleep / pet. Returns true when the cat snaps instead of enjoying it.
+  bool poke();
+  // The cat snaps at 1 in n pets (0 = never)
+  void set_snap_one_in(uint16_t n) { snap_one_in_ = n; }
+  uint16_t get_snap_one_in() const { return snap_one_in_; }
+  void seed(uint32_t s) { rng_ = s ? s : 0x12345678; }
+  void notice();  // heard something meant for another device: ears perk, a glance (doesn't wake it up)
   bool is_sleeping() const { return mood_ == MOOD_SLEEP; }
   Mood resting_mood() const;
 
@@ -158,6 +167,8 @@ class FaceEngine {
   void finish_bbox_(Prim &p);
   void heart_l(float x, float y, float s, float alpha);
   void zee_l(float x, float y, float s, float alpha);
+  void capsule_s(float ax, float ay, float bx, float by, float r, float alpha);  // screen coordinates
+  void draw_claws_();
 
   void draw_head_();
   void draw_eye_(int side, float open);
@@ -177,6 +188,8 @@ class FaceEngine {
   bool timer_show_{false}, timer_running_{false};
   float timer_frac_{0};
   uint32_t rng_{0x12345678};
+  uint16_t snap_one_in_{6};
+  float claw_x_{0}, claw_flip_{1};
 
   // events
   float next_blink_{2.0f};
@@ -200,7 +213,7 @@ class FaceEngine {
   Spring gaze_x_, gaze_y_;
   Spring mouth_open_, mouth_smile_, mouth_w_, zip_;
   Spring whisker_, blush_, cross_, shine_;
-  Spring exclaim_, question_, zzz_, dots_, ring_, hearts_;
+  Spring exclaim_, question_, zzz_, dots_, ring_, hearts_, claws_, gear_;
 
   // colours
   RGBf fg_{0.42f, 0.42f, 0.42f}, bg_{1, 1, 1};

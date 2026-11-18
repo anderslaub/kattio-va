@@ -1,5 +1,7 @@
 #include "kattio_face.h"
 
+#include <esp_random.h>
+
 #include "esphome/core/hal.h"
 #include "esphome/core/log.h"
 
@@ -23,7 +25,10 @@ struct Guard {
   SemaphoreHandle_t s_;
 };
 
-void KattioFace::setup() { this->lock_ = xSemaphoreCreateMutex(); }
+void KattioFace::setup() {
+  this->engine_.seed(esp_random());  // different surprises after every boot
+  this->lock_ = xSemaphoreCreateMutex();
+}
 
 void KattioFace::dump_config() {
   ESP_LOGCONFIG(TAG,
@@ -225,11 +230,27 @@ void KattioFace::set_timer(bool show, float fraction, bool running) {
   this->engine_.set_timer(show, fraction, running);
 }
 
-void KattioFace::poke() {
+bool KattioFace::poke() {
+  if (!this->lock_)
+    return false;
+  Guard g(this->lock_);
+  return this->engine_.poke();
+}
+
+void KattioFace::set_snap_one_in(uint16_t n) {
+  if (!this->lock_) {  // before setup: the render task isn't running yet
+    this->engine_.set_snap_one_in(n);
+    return;
+  }
+  Guard g(this->lock_);
+  this->engine_.set_snap_one_in(n);
+}
+
+void KattioFace::notice() {
   if (!this->lock_)
     return;
   Guard g(this->lock_);
-  this->engine_.poke();
+  this->engine_.notice();
 }
 
 bool KattioFace::is_sleeping() {

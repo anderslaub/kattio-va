@@ -1,0 +1,7 @@
+# Kattio box 2: everything is shared, see kattio-common.yaml
+substitutions:
+  name: kattio-box-2
+  friendly_name: Kattio Box 2
+
+packages:
+  kattio: !include kattio-common.yaml

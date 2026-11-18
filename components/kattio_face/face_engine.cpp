@@ -32,6 +32,8 @@ const RGBf BLUE = rgb(0x2C78E0), BLUE_BG = rgb(0xE4EEFC);
 const RGBf RED = rgb(0xDC2F2B), RED_BG = rgb(0xFDE5E4);
 const RGBf PURPLE = rgb(0x9B45D6), PURPLE_BG = rgb(0xF3E8FC);
 const RGBf PINK = rgb(0xE0558E), PINK_BG = rgb(0xFDE8F1);
+const RGBf ANGRY = rgb(0xC2410C), ANGRY_BG = rgb(0xFFE4D6);
+const RGBf TEAL = rgb(0x0B8A99), TEAL_BG = rgb(0xDDF3F5);  // working: calm, not listening-green or speaking-blue  // burnt orange: angry, but not the error red
 const RGBf BLUSH = rgb(0xFF8FA6);
 const RGBf TONGUE = rgb(0xFF7F93);
 
@@ -94,10 +96,23 @@ void FaceEngine::set_muted(bool m) {
     set_mood(resting_mood());
 }
 
-void FaceEngine::poke() {
-  if (mood_ == MOOD_IDLE || mood_ == MOOD_SLEEP || mood_ == MOOD_MUTED || mood_ == MOOD_HAPPY)
-    set_mood(MOOD_HAPPY);
+bool FaceEngine::poke() {
   idle_t_ = 0;
+  if (mood_ != MOOD_IDLE && mood_ != MOOD_SLEEP && mood_ != MOOD_MUTED && mood_ != MOOD_HAPPY)
+    return false;  // busy, or still grumpy from the last time: leave it alone
+  if (snap_one_in_ > 0 && rnd() * snap_one_in_ < 1.0f) {
+    set_mood(MOOD_SNAP);
+    return true;
+  }
+  set_mood(MOOD_HAPPY);
+  return false;
+}
+
+void FaceEngine::notice() {
+  twist_l_.v += 7.0f;
+  twist_r_.v += 7.0f;
+  if (mood_ == MOOD_IDLE && !pre_sleep_)
+    next_glance_ = 0;
 }
 
 void FaceEngine::set_mood(Mood m) {
@@ -150,6 +165,19 @@ void FaceEngine::enter_mood_(Mood m) {
       break;
     case MOOD_HAPPY:
       head_y_.v -= 90.0f;
+      break;
+    case MOOD_SNAP:
+      // Lunge at the finger
+      head_y_.v -= 170.0f;
+      squash_.v += 0.9f;
+      eye_scale_.v += 2.5f;
+      twist_l_.v -= 6.0f;
+      twist_r_.v -= 6.0f;
+      next_blink_ = 99;
+      color_tau_ = 0.1f;
+      claw_flip_ = rnd() < 0.5f ? -1.0f : 1.0f;
+      claw_x_ = rnd(-40, 40);
+      claws_.snap(1);
       break;
     case MOOD_IDLE:
       color_tau_ = (prev_mood_ == MOOD_BORED) ? 0.9f : 0.45f;
@@ -229,6 +257,8 @@ bool FaceEngine::update(float dt) {
     enter_mood_(resting_mood());
   else if (mood_ == MOOD_CONFUSED && mood_t_ > 2.6f)
     enter_mood_(resting_mood());
+  else if (mood_ == MOOD_SNAP && mood_t_ > 3.6f)
+    enter_mood_(resting_mood());
   if (mood_ == MOOD_IDLE) {
     idle_t_ += dt;
     // Getting sleepy: yawn, get drowsy for a moment, then fall asleep
@@ -277,6 +307,10 @@ bool FaceEngine::update(float dt) {
   if (mood_ == MOOD_BOOT && mood_t_ > 2.25f && mood_t_ - dt <= 2.25f)
     start_blink_(false);
 
+  // The answer was on its way: start talking with the first sound that actually plays
+  if (mood_ == MOOD_READY && speech_level_ > 0.04f)
+    set_mood(MOOD_SPEAK);
+
   // ---- speech envelope smoothing ----
   float lvl = clampf(speech_level_, 0, 1);
   if (mood_ != MOOD_SPEAK)
@@ -289,7 +323,7 @@ bool FaceEngine::update(float dt) {
   Spring *all[] = {&head_x_, &head_y_, &tilt_,   &squash_,  &ear_l_,       &ear_r_,   &twist_l_, &twist_r_,
                    &eye_l_,  &eye_r_,  &eye_scale_, &lid_top_, &lid_bot_,  &lid_slant_, &curve_, &gaze_x_,
                    &gaze_y_, &mouth_open_, &mouth_smile_, &mouth_w_, &zip_, &whisker_, &blush_, &cross_,
-                   &shine_,  &exclaim_, &question_, &zzz_, &dots_, &ring_, &hearts_};
+                   &shine_,  &exclaim_, &question_, &zzz_, &dots_, &ring_, &hearts_, &claws_, &gear_};
   int n = std::max(1, (int) ceilf(dt / (1.0f / 240.0f)));
   float sdt = dt / n;
   for (int i = 0; i < n; i++)
@@ -310,7 +344,8 @@ bool FaceEngine::update(float dt) {
                       0.01f;
   return vmax > 0.6f || blink_t_ >= 0 || color_moving || mood_ == MOOD_SPEAK || mood_ == MOOD_ALARM ||
          mood_ == MOOD_WAKE || mood_ == MOOD_ERROR || mood_ == MOOD_HAPPY || mood_ == MOOD_THINK ||
-         mood_ == MOOD_BORED;
+         mood_ == MOOD_BORED || mood_ == MOOD_SNAP || mood_ == MOOD_WORK || mood_ == MOOD_READY ||
+         claws_.x > 0.02f;
 }
 
 void FaceEngine::apply_mood_targets_(float dt) {
@@ -322,7 +357,7 @@ void FaceEngine::apply_mood_targets_(float dt) {
   float gx = 0, gy = 0;
   float mopen = 0, smile = 0.55f, mw = 1.0f, zip = 0;
   float whisker = 0, blush = 0, cross = 0, shine = 0;
-  float exclaim = 0, question = 0, zzz = 0, dots = 0, ring = 0, hearts = 0;
+  float exclaim = 0, question = 0, zzz = 0, dots = 0, ring = 0, hearts = 0, claws = 0, gear = 0;
   float breathe_amp = 0.010f, breathe_period = 4.2f;
   float lid_k = 90;
   float eye_k = 160, eye_z = 0.9f, gaze_k = 260, ear_k = 140, ear_z = 0.65f, head_k = 140, head_z = 0.55f;
@@ -369,7 +404,9 @@ void FaceEngine::apply_mood_targets_(float dt) {
         if (yawn_t_ < 1.9f) {
           eye_l = eye_r = 0;
           curve = -0.7f;
-          mopen = yawn_t_ < 0.25f ? 0.2f : 1.0f;
+          // big wide yawn (deliberately past the normal 0..1 range)
+          mopen = yawn_t_ < 0.25f ? 0.2f : 1.45f;
+          mw = 1.15f;
           hy = -5;
           tilt = 0.07f;
           ear_l = ear_r = -0.45f;
@@ -460,6 +497,39 @@ void FaceEngine::apply_mood_targets_(float dt) {
       tilt = 0.08f;
       ear_l = 0.2f;
       ear_r = 0.5f;
+      break;
+    }
+    case MOOD_READY: {
+      // About to answer: already in the speaking colour, eyes on you, a small breath in, "..." pulsing
+      fg_t_ = BLUE;
+      bg_t_ = BLUE_BG;
+      eye_l = eye_r = 1.06f;
+      shine = 1;
+      ear_l = ear_r = 0.5f;
+      mopen = 0.12f + 0.05f * sinf(time_ * 3.0f);
+      mw = 0.75f;
+      smile = 0.45f;
+      squash = -0.015f * sinf(time_ * 1.5f);
+      dots = 0.8f;
+      break;
+    }
+    case MOOD_WORK: {
+      // Busy in the background: eyes follow the spinning cog, a little concentrated nod now and then
+      fg_t_ = TEAL;
+      bg_t_ = TEAL_BG;
+      gear = 1;
+      lid_top = 0.12f;
+      lid_bot = 0.12f;
+      eye_scale = 1.04f;
+      gx = 0.62f + 0.06f * sinf(time_ * 2.2f);
+      gy = -0.55f + 0.05f * cosf(time_ * 2.2f);
+      gaze_k = 90;
+      smile = 0.1f;
+      mw = 0.6f;
+      tilt = 0.06f + 0.02f * sinf(time_ * 0.7f);
+      hy = 1.5f * powf(fmaxf(0.0f, sinf(time_ * 1.6f)), 6.0f);  // small nod
+      ear_l = 0.35f;
+      ear_r = 0.55f + 0.15f * sinf(time_ * 3.1f);
       break;
     }
     case MOOD_SPEAK: {
@@ -571,6 +641,43 @@ void FaceEngine::apply_mood_targets_(float dt) {
       whisker = 0.5f;
       break;
     }
+    case MOOD_SNAP: {
+      fg_t_ = ANGRY;
+      bg_t_ = ANGRY_BG;
+      claws = t < 2.0f ? 1 : 0;
+      ear_k = 400;
+      ear_z = 0.5f;
+      if (t < 1.9f) {
+        // Angry slanted eyes, ears flat, snarling, shaking with a growl
+        eye_l = eye_r = 0.95f;
+        slant = -0.95f;
+        lid_top = 0.22f;
+        lid_k = 500;
+        ear_l = ear_r = -1.0f;
+        whisker = 1;
+        mopen = 0.42f + 0.07f * sinf(t * 2 * PI * 9.0f);
+        mw = 1.1f;
+        smile = -0.6f;
+        if (t > 0.25f) {
+          hx = 1.8f * sinf(time_ * 2 * PI * 17.0f);
+          head_k = 1200;
+          head_z = 1.0f;
+        }
+      } else {
+        // Still offended: looks away
+        color_tau_ = 0.6f;
+        slant = -0.45f;
+        lid_top = 0.45f;
+        gx = 0.9f * claw_flip_;
+        gy = 0.15f;
+        gaze_k = 60;
+        ear_l = ear_r = -0.45f;
+        smile = -0.35f;
+        mw = 0.8f;
+        tilt = -0.05f * claw_flip_;
+      }
+      break;
+    }
     case MOOD_CONFUSED: {
       fg_t_ = (resting_mood() == MOOD_IDLE) ? GREY_LIGHT : GREY_MED;
       bg_t_ = WHITE;
@@ -657,6 +764,8 @@ void FaceEngine::apply_mood_targets_(float dt) {
   dots_.set(dots, 100, 0.7f);
   ring_.set(ring, 200, 1.0f);
   hearts_.set(hearts, 40, 1.0f);
+  claws_.set(claws, 25, 1.0f);
+  gear_.set(gear, 60, 0.8f);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -711,6 +820,23 @@ void FaceEngine::capsule_l(float ax, float ay, float bx, float by, float r, uint
   p.alpha = clampf(alpha, 0, 1);
   xf(ax, ay, p.ax, p.ay);
   xf(bx, by, p.bx, p.by);
+  p.r = r;
+  finish_bbox_(p);
+  if (p.x0 <= p.x1 && p.y0 <= p.y1)
+    prims_.push_back(p);
+}
+
+void FaceEngine::capsule_s(float ax, float ay, float bx, float by, float r, float alpha) {
+  if (alpha <= 0.01f || r <= 0.05f)
+    return;
+  Prim p{};
+  p.kind = 0;
+  p.layer = LAYER_MAIN;
+  p.alpha = clampf(alpha, 0, 1);
+  p.ax = ax;
+  p.ay = ay;
+  p.bx = bx;
+  p.by = by;
   p.r = r;
   finish_bbox_(p);
   if (p.x0 <= p.x1 && p.y0 <= p.y1)
@@ -1040,6 +1166,22 @@ void FaceEngine::draw_extras_() {
         ellipse_l(px[i], py[i], r, r);
     }
   }
+  // spinning cog (working)
+  float gs = gear_.x;
+  if (gs > 0.03f) {
+    const float cx = 122, cy = -84, R = 11.0f * gs, ang = time_ * 1.8f;
+    const int RIM = 14, TEETH = 7;
+    for (int i = 0; i < RIM; i++) {
+      float a0 = ang + i * 2 * PI / RIM, a1 = ang + (i + 1) * 2 * PI / RIM;
+      capsule_l(cx + R * cosf(a0), cy + R * sinf(a0), cx + R * cosf(a1), cy + R * sinf(a1), 2.6f * gs);
+    }
+    for (int i = 0; i < TEETH; i++) {
+      float a = ang + i * 2 * PI / TEETH;
+      capsule_l(cx + (R + 1.5f) * cosf(a), cy + (R + 1.5f) * sinf(a), cx + (R + 6.0f * gs) * cosf(a),
+                cy + (R + 5.5f * gs) * sinf(a), 3.2f * gs);
+    }
+    ellipse_l(cx, cy, 3.4f * gs, 3.4f * gs);
+  }
   // ringing lines (alarm)
   float rg = ring_.x;
   if (rg > 0.03f) {
@@ -1056,6 +1198,7 @@ void FaceEngine::draw_extras_() {
       }
     }
   }
+  draw_claws_();
   // floating hearts (petting)
   float hh = hearts_.x;
   if (hh > 0.03f) {
@@ -1064,6 +1207,45 @@ void FaceEngine::draw_extras_() {
       float side = (i % 2) ? 1.0f : -1.0f;
       float a = hh * sinf(p * PI);
       heart_l(side * (122 + 10 * p), -62 - 48 * p, 10.0f + 5 * p, a);
+    }
+  }
+}
+
+// Three claw scratches swiped across the screen glass (screen coordinates, they don't move with the head)
+void FaceEngine::draw_claws_() {
+  float alpha = claws_.x;
+  if (alpha <= 0.02f || (mood_ != MOOD_SNAP && mood_t_ > 3.0f))
+    return;
+  const float t = mood_ == MOOD_SNAP ? mood_t_ : 10.0f;
+  // direction of the swipe: from the top, down and sideways
+  float dx = -0.62f * claw_flip_, dy = 1.0f;
+  float dl = sqrtf(dx * dx + dy * dy);
+  dx /= dl;
+  dy /= dl;
+  float px = -dy, py = dx;  // perpendicular: spacing between the claws
+  const float len = 190.0f;
+  const int SEGS = 14;
+  for (int c = 0; c < 3; c++) {
+    float prog = clampf((t - 0.08f - 0.035f * c) / 0.13f, 0, 1);
+    if (prog <= 0)
+      continue;
+    float off = (c - 1) * 30.0f;
+    float l = len * (c == 1 ? 1.0f : 0.86f);
+    float sx = W * 0.5f + claw_x_ - dx * l * 0.5f + px * off;
+    float sy = H * 0.5f - dy * l * 0.5f + py * off;
+    float rmax = c == 1 ? 7.5f : 6.0f;
+    float lx = sx, ly = sy;
+    int n = std::max(1, (int) ceilf(SEGS * prog));
+    for (int i = 1; i <= n; i++) {
+      float u = std::min(prog, (float) i / SEGS);
+      float bow = 10.0f * sinf(u * PI) * claw_flip_;
+      float x = sx + dx * l * u + px * bow;
+      float y = sy + dy * l * u + py * bow;
+      float um = u - 0.5f / SEGS;
+      float r = 1.0f + rmax * powf(std::max(0.0f, sinf(um * PI)), 0.6f);
+      capsule_s(lx, ly, x, y, r, alpha);
+      lx = x;
+      ly = y;
     }
   }
 }

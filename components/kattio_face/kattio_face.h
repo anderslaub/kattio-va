@@ -37,7 +37,9 @@ class KattioFace : public Component {
   void set_connected(bool connected);
   void set_muted(bool muted);
   void set_timer(bool show, float fraction, bool running);
-  void poke();
+  bool poke();
+  void set_snap_one_in(uint16_t n);
+  void notice();
   bool is_sleeping();
 
  protected:

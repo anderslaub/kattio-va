@@ -24,10 +24,10 @@ int main(int argc, char **argv) {
 
   // storyboard (seconds)
   std::vector<Step> story = {
-      {0.5f, "connect"},  {7.0f, "wake"},    {9.5f, "think"},  {11.5f, "speak"}, {15.5f, "listen"},
+      {0.5f, "connect"},  {7.0f, "wake"},    {9.5f, "think"},  {11.0f, "ready"}, {12.5f, "audio"}, {15.5f, "listen"},
       {17.0f, "think"},   {18.5f, "speak"},  {20.5f, "listen"}, {22.5f, "bored"}, {29.0f, "error"},
       {33.5f, "poke"},    {37.5f, "alarm"},  {40.5f, "idle"},  {41.0f, "mute"},  {44.0f, "unmute"},
-      {44.5f, "confused"}, {47.5f, "offline"}, {51.0f, "online"}, {80.0f, "wake"}, {82.0f, "end"},
+      {44.5f, "confused"}, {47.5f, "offline"}, {51.0f, "online"}, {52.0f, "work"}, {58.0f, "idle"}, {80.0f, "wake"}, {82.0f, "end"},
   };
   // Sleep happens via the shortened timeout around t=~70
 
@@ -35,6 +35,7 @@ int main(int argc, char **argv) {
   std::vector<uint16_t> px(320 * 240);
   std::vector<uint8_t> cov(320 * 240 * LAYER_COUNT);
   size_t si = 0;
+  bool audio_on = false;
   int frame = 0;
   for (float t = 0; t < 82.0f; t += dt) {
     while (si < story.size() && story[si].at <= t) {
@@ -63,6 +64,14 @@ int main(int argc, char **argv) {
         f.set_muted(true);
       else if (w == "unmute")
         f.set_muted(false);
+      else if (w == "ready")
+        f.set_mood(MOOD_READY);
+      else if (w == "audio")
+        audio_on = true;  // the TTS audio arrives: READY turns into SPEAK by itself
+      else if (w == "work")
+        f.set_mood(MOOD_WORK);
+      else if (w == "snap")
+        f.set_mood(MOOD_SNAP);
       else if (w == "confused")
         f.set_mood(MOOD_CONFUSED);
       else if (w == "offline")
@@ -73,7 +82,9 @@ int main(int argc, char **argv) {
     }
     // fake speech envelope: syllables
     float lvl = 0;
-    if (f.get_mood() == MOOD_SPEAK) {
+    if (f.get_mood() != MOOD_SPEAK && f.get_mood() != MOOD_READY)
+      audio_on = false;
+    if (f.get_mood() == MOOD_SPEAK || audio_on) {
       float s = sinf(t * 2 * 3.14159f * 4.2f) * 0.5f + 0.5f;
       float w = sinf(t * 2 * 3.14159f * 0.9f) * 0.5f + 0.5f;
       lvl = s * (0.4f + 0.6f * w);

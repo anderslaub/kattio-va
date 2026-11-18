@@ -10,10 +10,17 @@
 # Hardware note: on the BOX-3 the microphone and the speaker share one I2S bus, so the mic
 # can't listen while the speaker plays. Tap the screen to interrupt the cat while it talks.
 
+# Shared by all boxes: build kattio-box-1.yaml / kattio-box-2.yaml, which set the name.
 substitutions:
-  name: cat-in-a-box-1
-  friendly_name: Cat-in-a-Box 1
+  name: kattio-box
+  friendly_name: Kattio Box
+  # Two wake words, each can run its own HA assistant: set "Wake word"/"Assistant" and "Wake word 2"/
+  # "Assistant 2" on the device in HA (e.g. Hey Kattio -> HA intents, Okay Kattio -> pi).
+  # Models come from wakewords/<name>/latest.* via tools/sync_wakewords.py
   wake_word_model: wakewords/hey_kattio/esphome/hey_kattio.json
+  wake_word_2_model: wakewords/okay_kattio/esphome/okay_kattio.json
+  # Petting: the cat snaps (growl + claw marks) at 1 in this many pets; 0 = never. Also adjustable in HA.
+  snap_one_in: "4"
 
 esphome:
   name: ${name}
@@ -53,6 +60,27 @@ api:
     - lambda: id(face).set_connected(true);
   on_client_disconnected:
     - lambda: id(face).set_connected(false);
+  actions:
+    # Called by the Pi Agent integration while pi works on a task in the background (and when it is done):
+    # the cat shows the "working" face instead of waiting for an answer
+    - action: pi_agent_working
+      variables:
+        working: bool
+      then:
+        - lambda: |-
+            ESP_LOGI("kattio", "pi is %s", working ? "working" : "done");
+            if (working) {
+              id(pi_working) = true;
+              id(pi_working_since) = millis();
+            } else if (id(pi_working)) {
+              id(pi_working) = false;
+              // In chat mode, listen again after the result has been announced
+              if (id(chat_mode)) {
+                id(resume_after_announce) = true;
+                id(resume_since) = millis();
+              }
+            }
+        - script.execute: show_working
 
 ota:
   - platform: esphome
@@ -103,6 +131,7 @@ kattio_face:
   fps: 30
   resting_fps: 12
   sleep_timeout: 10min
+  snap_one_in: ${snap_one_in}
 
 output:
   - platform: ledc
@@ -141,6 +170,8 @@ audio_adc:
     i2c_id: i2c_bus
     id: es7210_adc
     bits_per_sample: 16bit
+    # +9 dB over the default (24 dB) so the wake word is caught from across the room
+    mic_gain: 33db
     sample_rate: 16000
 
 audio_dac:
@@ -175,7 +206,7 @@ speaker:
     output_speaker: box_speaker
     highpass: 170Hz
     presence: 3.0
-    loudness_boost: 4.0
+    loudness_boost: 8.0
 
 media_player:
   - platform: speaker
@@ -184,6 +215,7 @@ media_player:
     # ES8311: 0.75 = 0 dB, above that is digital gain that clips. Keep the limiter the last word.
     volume_min: 0.45
     volume_max: 0.75
+    volume_initial: 0.9  # first boot only; after that the last volume is remembered
     announcement_pipeline:
       speaker: voice_out
       format: FLAC
@@ -192,6 +224,17 @@ media_player:
     files:
       - id: timer_finished_sound
         file: https://github.com/esphome/home-assistant-voice-pe/raw/dev/sounds/timer_finished.flac
+      - id: growl_sound
+        file: sounds/growl.flac  # tools/make_growl.py
+      - id: purr_sound
+        file: sounds/purr.flac  # tools/make_purr.py
+      # waiting for the answer: tools/make_meow.py
+      - id: meow_wait_sound
+        file: sounds/meow_wait.flac
+      - id: meow_1_sound
+        file: sounds/meow_1.flac
+      - id: meow_2_sound
+        file: sounds/meow_2.flac
     on_announcement:
       # The mic and speaker share the I2S bus: release the mic before playing
       - if:
@@ -205,7 +248,9 @@ media_player:
               voice_assistant.is_running:
           then:
             - lambda: |-
-                if (id(face).get_mood() != kattio::MOOD_ALARM) id(face).set_mood(kattio::MOOD_SPEAK);
+                auto m = id(face).get_mood();
+                if (m != kattio::MOOD_ALARM && m != kattio::MOOD_SNAP && m != kattio::MOOD_HAPPY)
+                  id(face).set_mood(kattio::MOOD_SPEAK);
     on_idle:
       - if:
           condition:
@@ -214,7 +259,21 @@ media_player:
           then:
             - lambda: |-
                 if (id(face).get_mood() == kattio::MOOD_SPEAK) id(face).set_mood(kattio::MOOD_IDLE);
-            - script.execute: start_wake_word
+            - script.execute: show_working
+            # A background task's result was just announced in chat mode: carry on with the conversation
+            - if:
+                condition:
+                  lambda: |-
+                    bool resume = id(resume_after_announce) && id(chat_mode) && !id(pi_working) && !id(mute).state &&
+                                  millis() - id(resume_since) < 10 * 60 * 1000;
+                    id(resume_after_announce) = false;
+                    return resume;
+                then:
+                  - lambda: id(multi_turn) = true;
+                  - voice_assistant.start:
+                      wake_word: !lambda return id(conv_wake_word);
+                else:
+                  - script.execute: start_wake_word
 
 # ---------------------------------------------------------------------------------------------
 # Wake words and voice assistant
@@ -225,6 +284,8 @@ micro_wake_word:
   models:
     - model: ${wake_word_model}
       id: hey_kattio
+    - model: ${wake_word_2_model}
+      id: okay_kattio
     - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
       id: stop
       internal: true
@@ -242,12 +303,32 @@ micro_wake_word:
               then:
                 - switch.turn_off: timer_ringing
               else:
-                - lambda: |-
-                    id(chat_mode) = false;
-                    id(multi_turn) = false;
-                    id(face).set_mood(kattio::MOOD_WAKE);
-                - voice_assistant.start:
-                    wake_word: !lambda return wake_word;
+                # Several boxes may have heard it: the arbiter lets only the closest one answer
+                - lambda: id(arbiter).claim(wake_word);
+
+# Only one box answers a wake word: every box scores how loud it heard it, they compare over UDP
+# and the loudest (= closest) one answers. Without other boxes around it answers immediately.
+udp:
+  id: arbiter_udp
+  port: 18512
+
+va_arbiter:
+  id: arbiter
+  udp_id: arbiter_udp
+  microphone: box_mic
+  key: !secret arbiter_key
+  on_won:
+    - lambda: |-
+        id(chat_mode) = id(multi_turn_on).state;
+        id(multi_turn) = false;
+        id(conv_wake_word) = wake_word;
+        id(face).set_mood(kattio::MOOD_WAKE);
+    - voice_assistant.start:
+        wake_word: !lambda return wake_word;
+  on_lost:
+    # Another box is closer: perk the ears and keep listening for the wake word
+    - lambda: id(face).notice();
+    - script.execute: start_wake_word
 
 voice_assistant:
   id: va
@@ -264,12 +345,12 @@ voice_assistant:
         condition:
           lambda: return id(multi_turn);
         then:
-          - micro_wake_word.disable_model: hey_kattio
-          - micro_wake_word.enable_model: stop
+          - script.execute: listen_for_stop_only
           - micro_wake_word.start:
   on_stt_vad_end:
     - lambda: id(face).set_mood(kattio::MOOD_THINK);
     - script.execute: release_mic_for_speaker
+    - script.execute: waiting_meows
   on_stt_end:
     - script.execute: release_mic_for_speaker
     # "...let's talk" switches on chat mode: keep listening after every answer until "stop" or silence
@@ -308,9 +389,11 @@ voice_assistant:
           # A non-empty x means a streaming TTS response has started
           lambda: return !x.empty();
         then:
-          - lambda: id(face).set_mood(kattio::MOOD_SPEAK);
+          - script.execute: answer_on_its_way
+  # The answer is there and its speech is being generated: "about to speak" until the first sound plays
+  # (the face switches to speaking by itself then)
   on_tts_start:
-    - lambda: id(face).set_mood(kattio::MOOD_SPEAK);
+    - script.execute: answer_on_its_way
   on_end:
     - script.execute: after_run
   on_error:
@@ -345,10 +428,31 @@ voice_assistant:
 
 script:
   # (Re)start listening for "Hey Kattio" with the normal model set
+  # During a follow-up only "stop" is listened for. Remember which wake words HA has active, so they can be
+  # restored exactly (HA's Wake word / Wake word 2 settings decide which models run).
+  - id: listen_for_stop_only
+    then:
+      - lambda: |-
+          if (!id(ww_saved)) {
+            id(ww_hey_on) = id(hey_kattio).is_enabled();
+            id(ww_okay_on) = id(okay_kattio).is_enabled();
+            id(ww_saved) = true;
+          }
+      - micro_wake_word.disable_model: hey_kattio
+      - micro_wake_word.disable_model: okay_kattio
+      - micro_wake_word.enable_model: stop
+
   - id: start_wake_word
     then:
       - micro_wake_word.disable_model: stop
-      - micro_wake_word.enable_model: hey_kattio
+      - if:
+          condition:
+            lambda: return id(ww_saved);
+          then:
+            - lambda: |-
+                id(ww_saved) = false;
+                if (id(ww_hey_on)) id(hey_kattio).enable(); else id(hey_kattio).disable();
+                if (id(ww_okay_on)) id(okay_kattio).enable(); else id(okay_kattio).disable();
       - if:
           condition:
             and:
@@ -398,25 +502,85 @@ script:
           else:
             - if:
                 condition:
-                  lambda: return id(chat_mode) && !id(mute).state;
+                  # While pi works in the background there is nothing to answer yet: show "working" instead,
+                  # and pick the conversation up again once the result is announced (pi_agent_working)
+                  lambda: return id(chat_mode) && !id(mute).state && !id(pi_working);
                 then:
-                  # Chat mode: listen again (same conversation id, so the context carries over)
+                  # Chat mode: listen again (same conversation id, so the context carries over). Pass the
+                  # wake word that started it, so HA keeps using the same assistant (pipeline 1 or 2).
                   - lambda: id(multi_turn) = true;
                   - voice_assistant.start:
+                      wake_word: !lambda return id(conv_wake_word);
                 else:
                   - script.execute: end_conversation
 
+  - id: answer_on_its_way
+    then:
+      - script.stop: waiting_meows
+      - lambda: |-
+          if (id(face).get_mood() != kattio::MOOD_SPEAK) id(face).set_mood(kattio::MOOD_READY);
+
+  # Waiting for the answer: a low "meow-meow" after 5 s, then a single meow now and then
+  - id: waiting_meows
+    mode: restart
+    then:
+      - delay: 5s
+      - if:
+          condition:
+            lambda: return id(face).get_mood() == kattio::MOOD_THINK && id(waiting_meows_on).state;
+          then:
+            - media_player.speaker.play_on_device_media_file:
+                media_file: meow_wait_sound
+                announcement: true
+      - while:
+          condition:
+            lambda: return id(face).get_mood() == kattio::MOOD_THINK && id(waiting_meows_on).state;
+          then:
+            - delay: !lambda return 7000 + esp_random() % 9000;
+            - if:
+                condition:
+                  lambda: return id(face).get_mood() == kattio::MOOD_THINK;
+                then:
+                  - if:
+                      condition:
+                        lambda: return (esp_random() & 1) != 0;
+                      then:
+                        - media_player.speaker.play_on_device_media_file:
+                            media_file: meow_1_sound
+                            announcement: true
+                      else:
+                        - media_player.speaker.play_on_device_media_file:
+                            media_file: meow_2_sound
+                            announcement: true
+
   - id: end_conversation
     then:
+      - script.stop: waiting_meows
       - lambda: |-
           id(multi_turn) = false;
-          id(chat_mode) = false;
+          // Chat mode survives a background task, so the conversation continues after its result
+          if (!id(pi_working)) id(chat_mode) = false;
           auto m = id(face).get_mood();
           if (m == kattio::MOOD_SPEAK || m == kattio::MOOD_LISTEN || m == kattio::MOOD_THINK ||
-              m == kattio::MOOD_WAKE) {
+              m == kattio::MOOD_WAKE || m == kattio::MOOD_READY) {
             id(face).set_mood(kattio::MOOD_IDLE);
           }
+      - script.execute: show_working
       - script.execute: start_wake_word
+
+  # "Working" face while pi is busy in the background, unless the cat is doing something else right now
+  - id: show_working
+    then:
+      - lambda: |-
+          auto m = id(face).get_mood();
+          bool busy = id(va).is_running() || id(speaker_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+          if (id(pi_working) && !busy &&
+              (m == kattio::MOOD_IDLE || m == kattio::MOOD_SLEEP || m == kattio::MOOD_BORED ||
+               m == kattio::MOOD_CONFUSED || m == kattio::MOOD_SPEAK)) {
+            id(face).set_mood(kattio::MOOD_WORK);
+          } else if (!id(pi_working) && m == kattio::MOOD_WORK) {
+            id(face).set_mood(kattio::MOOD_IDLE);
+          }
 
   # "Stop" heard during a follow-up: end the conversation with a sigh
   - id: handle_stop_word
@@ -450,7 +614,7 @@ script:
           else:
             - if:
                 condition:
-                  lambda: return id(face).get_mood() == kattio::MOOD_SPEAK;
+                  lambda: return id(face).get_mood() == kattio::MOOD_SPEAK || id(face).get_mood() == kattio::MOOD_READY;
                 then:
                   - lambda: |-
                       id(multi_turn) = false;
@@ -460,7 +624,30 @@ script:
                       announcement: true
                   - lambda: id(face).set_mood(kattio::MOOD_BORED);
                 else:
-                  - lambda: id(face).poke();
+                  - script.execute: pet
+
+  # Pet the cat. Mostly it loves it and purrs, but now and then it snaps: growl and claw marks (snap_one_in)
+  - id: pet
+    then:
+      - if:
+          condition:
+            lambda: return id(face).poke();
+          then:
+            - media_player.speaker.play_on_device_media_file:
+                media_file: growl_sound
+                announcement: true
+          else:
+            # Happy: purr (keep purring through more strokes instead of restarting it)
+            - if:
+                condition:
+                  and:
+                    - lambda: return id(face).get_mood() == kattio::MOOD_HAPPY;
+                    - not:
+                        media_player.is_announcing:
+                then:
+                  - media_player.speaker.play_on_device_media_file:
+                      media_file: purr_sound
+                      announcement: true
 
   # Push to talk
   - id: push_to_talk
@@ -480,8 +667,9 @@ script:
                       announcement: true
             - micro_wake_word.stop:
             - lambda: |-
-                id(chat_mode) = false;
+                id(chat_mode) = id(multi_turn_on).state;
                 id(multi_turn) = false;
+                id(conv_wake_word) = "";  // push to talk always uses the first assistant
                 id(face).set_mood(kattio::MOOD_WAKE);
             - voice_assistant.start:
 
@@ -505,10 +693,44 @@ script:
           id(face).set_timer(found, frac, running);
 
 globals:
+  # Wake word phrase that started the current conversation (picks the HA assistant for follow-ups)
+  - id: conv_wake_word
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: ww_saved
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: ww_hey_on
+    type: bool
+    restore_value: false
+    initial_value: "true"
+  - id: ww_okay_on
+    type: bool
+    restore_value: false
+    initial_value: "true"
   - id: chat_mode
     type: bool
     restore_value: false
     initial_value: "false"
+  # pi (Pi Agent integration) is working on a task in the background
+  - id: pi_working
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: pi_working_since
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: resume_after_announce
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: resume_since
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
   - id: multi_turn
     type: bool
     restore_value: false
@@ -526,6 +748,29 @@ touchscreen:
     display: s3_box_lcd
     on_touch:
       - script.execute: on_tap
+
+interval:
+  # Forget a background task that was never reported done (Home Assistant restarted, bridge gone, ...)
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: return id(pi_working) && millis() - id(pi_working_since) > 45 * 60 * 1000;
+          then:
+            - lambda: |-
+                ESP_LOGW("kattio", "pi never reported back; leaving the working state");
+                id(pi_working) = false;
+            - script.execute: show_working
+
+# Why and when the box last restarted (crashes show up here)
+debug:
+  update_interval: 5min
+
+sensor:
+  - platform: uptime
+    name: Uptime
+    entity_category: diagnostic
+    update_interval: 60s
 
 binary_sensor:
   # Top-left button: stop a ringing timer; hold 10s for factory reset
@@ -586,7 +831,7 @@ button:
     name: Pet the cat
     icon: "mdi:cat"
     on_press:
-      - lambda: id(face).poke();
+      - script.execute: pet
 
 switch:
   - platform: gpio
@@ -612,6 +857,22 @@ switch:
       - microphone.unmute:
       - lambda: id(face).set_muted(false);
       - script.execute: start_wake_word
+  # Keep listening after every answer (until silence or "stop"), not only after questions. When off, saying
+  # "let's talk" switches it on for one conversation.
+  - platform: template
+    name: Multi-turn
+    id: multi_turn_on
+    icon: "mdi:message-reply-text"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+  - platform: template
+    name: Waiting meows
+    id: waiting_meows_on
+    icon: "mdi:cat"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
   - platform: template
     name: Voice enhancer
     id: voice_enhancer
@@ -655,6 +916,26 @@ switch:
       - delay: 15min
       - switch.turn_off: timer_ringing
 
+select:
+  # Wake word sensitivity (probability cutoff of "Hey Kattio"): more sensitive = more false wakes
+  - platform: template
+    name: Wake word sensitivity
+    id: wake_word_sensitivity
+    icon: mdi:ear-hearing
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_option: Moderately sensitive
+    options:
+      - Slightly sensitive
+      - Moderately sensitive
+      - Very sensitive
+    on_value:
+      - lambda: |-
+          static const uint8_t CUTOFFS[] = {250, 240, 224};  // 0.98 / 0.94 / 0.88
+          id(hey_kattio).set_probability_cutoff(CUTOFFS[i]);
+          id(okay_kattio).set_probability_cutoff(CUTOFFS[i]);
+
 number:
   - platform: template
     name: Loudness boost
@@ -665,7 +946,7 @@ number:
     min_value: 0
     max_value: 12
     step: 1
-    initial_value: 4
+    initial_value: 8
     optimistic: true
     restore_value: true
     on_value:
@@ -684,8 +965,26 @@ number:
     restore_value: true
     on_value:
       - lambda: id(face).set_sleep_timeout((uint32_t) (x * 60000));
+  - platform: template
+    name: Snaps at 1 in N pets
+    id: snap_one_in
+    icon: "mdi:paw"
+    entity_category: config
+    mode: box
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: ${snap_one_in}
+    optimistic: true
+    restore_value: true
+    on_value:
+      - lambda: id(face).set_snap_one_in((uint16_t) x);
 
 text_sensor:
+  - platform: debug
+    reset_reason:
+      name: Reset reason
+      entity_category: diagnostic
   - platform: template
     name: Mood
     icon: "mdi:cat"
@@ -694,6 +993,6 @@ text_sensor:
     lambda: |-
       static const char *const NAMES[] = {"booting", "idle", "sleeping", "waking", "listening", "thinking",
                                           "speaking", "bored", "error", "muted", "offline", "alarm",
-                                          "happy", "confused"};
+                                          "happy", "confused", "snapping", "working", "answering"};
       auto m = (unsigned) id(face).get_mood();
       return std::string(m < sizeof(NAMES) / sizeof(NAMES[0]) ? NAMES[m] : "?");
