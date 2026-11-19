@@ -98,6 +98,8 @@ void VoiceEnhancer::start() {
   this->pending_len_ = 0;
   this->pending_off_ = 0;
   this->finish_requested_ = false;
+  this->finishing_ = false;
+  this->last_audio_ms_ = millis();
   this->written_blocks_ = 0;
   this->played_frames_ = 0;
   this->block_count_ = 0;
@@ -120,6 +122,7 @@ void VoiceEnhancer::stop() {
 
 void VoiceEnhancer::finish() {
   std::lock_guard<std::mutex> lock(this->mtx_);
+  this->finishing_ = true;
   if (this->pending_len_ > 0) {
     this->finish_requested_ = true;  // loop() flushes, then finishes the output
   } else {
@@ -141,6 +144,17 @@ void VoiceEnhancer::flush_pending_(TickType_t ticks) {
 }
 
 void VoiceEnhancer::loop() {
+  // A streamed answer can arrive in bursts (the TTS synthesizes it slice by slice). If the output ran dry
+  // mid-stream, the I2S speaker would stop after its idle timeout, and audio arriving while it stops is lost
+  // (words skipped). Until the stream ends (finish()), bridge such gaps with silence.
+  if (this->state_ == speaker::STATE_RUNNING && !this->finishing_ && this->pending_len_ == 0 &&
+      !this->output_->has_buffered_data()) {
+    uint32_t idle = millis() - this->last_audio_ms_;
+    if (idle > 60 && idle < 15000 && this->mtx_.try_lock()) {
+      this->pad_silence_();
+      this->mtx_.unlock();
+    }
+  }
   // Never block the main loop: if the audio task is busy writing, try again next loop
   if ((this->pending_len_ > 0 || this->finish_requested_) && this->mtx_.try_lock()) {
     this->flush_pending_(0);
@@ -162,6 +176,28 @@ void VoiceEnhancer::loop() {
   }
 }
 
+void VoiceEnhancer::pad_silence_() {
+  // 20 ms of silence, through the same processing (filters, level meter) as real audio so lip sync stays aligned
+  auto &info = this->audio_stream_info_;
+  const int ch = info.get_channels();
+  const int bps = info.get_bits_per_sample();
+  if (bps != 16 || ch < 1 || ch > 2)
+    return;
+  const size_t frame_bytes = (size_t) ch * 2;
+  size_t bytes = std::min(BUF_BYTES, (size_t) (info.get_sample_rate() / 50) * frame_bytes);
+  bytes -= bytes % frame_bytes;
+  memset(this->scratch_, 0, bytes);
+  if (this->dirty_)
+    this->design_filters_();
+  this->process_(reinterpret_cast<int16_t *>(this->scratch_), bytes / frame_bytes, ch);
+  size_t n = this->output_->play(this->scratch_, bytes, 0);
+  if (n < bytes) {
+    memcpy(this->pending_, this->scratch_ + n, bytes - n);
+    this->pending_off_ = 0;
+    this->pending_len_ = bytes - n;
+  }
+}
+
 size_t VoiceEnhancer::play(const uint8_t *data, size_t length, TickType_t ticks_to_wait) {
   // Like ESPHome's own speakers: writing to a stopped speaker (re)starts it
   if (this->state_ != speaker::STATE_RUNNING && this->state_ != speaker::STATE_STARTING)
@@ -180,6 +216,8 @@ size_t VoiceEnhancer::play(const uint8_t *data, size_t length, TickType_t ticks_
   take -= take % frame_bytes;
   if (take == 0)
     return 0;
+  this->last_audio_ms_ = millis();
+  this->finishing_ = false;
   memcpy(this->scratch_, data, take);
   if (bps == 16 && ch >= 1 && ch <= 2) {
     if (this->dirty_)

@@ -87,6 +87,7 @@ class VoiceEnhancer : public Component, public speaker::Speaker {
   void design_filters_();
   void process_(int16_t *samples, size_t frames, int channels);
   void flush_pending_(TickType_t ticks);
+  void pad_silence_();
 
   speaker::Speaker *output_{nullptr};
   std::mutex mtx_;
@@ -97,7 +98,9 @@ class VoiceEnhancer : public Component, public speaker::Speaker {
   size_t pending_off_{0};
   std::atomic<size_t> pending_len_{0};
   bool finish_requested_{false};
+  std::atomic<bool> finishing_{false};  // the stream has ended (finish() was called): let the output stop when it runs dry
   uint32_t start_ms_{0};
+  std::atomic<uint32_t> last_audio_ms_{0};
 
   // settings
   bool enabled_{true};
