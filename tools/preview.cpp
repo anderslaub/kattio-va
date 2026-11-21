@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
       {0.5f, "connect"},  {7.0f, "wake"},    {9.5f, "think"},  {11.0f, "ready"}, {12.5f, "audio"}, {15.5f, "listen"},
       {17.0f, "think"},   {18.5f, "speak"},  {20.5f, "listen"}, {22.5f, "bored"}, {29.0f, "error"},
       {33.5f, "poke"},    {37.5f, "alarm"},  {40.5f, "idle"},  {41.0f, "mute"},  {44.0f, "unmute"},
-      {44.5f, "confused"}, {47.5f, "offline"}, {51.0f, "online"}, {52.0f, "work"}, {58.0f, "idle"}, {80.0f, "wake"}, {82.0f, "end"},
+      {44.5f, "confused"}, {47.5f, "offline"}, {51.0f, "online"}, {52.0f, "work"}, {58.0f, "loading"}, {64.0f, "idle"}, {80.0f, "wake"}, {82.0f, "end"},
   };
   // Sleep happens via the shortened timeout around t=~70
 
@@ -70,6 +70,8 @@ int main(int argc, char **argv) {
         audio_on = true;  // the TTS audio arrives: READY turns into SPEAK by itself
       else if (w == "work")
         f.set_mood(MOOD_WORK);
+      else if (w == "loading")
+        f.set_mood(MOOD_LOADING);
       else if (w == "snap")
         f.set_mood(MOOD_SNAP);
       else if (w == "confused")

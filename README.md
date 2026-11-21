@@ -50,7 +50,8 @@ Restore the old firmware: `esptool --port /dev/ttyACM0 write-flash 0 backup/old_
 | offline | no Wi-Fi / HA | sad slanted eyes, "?" |
 | alarm | timer finished | purple, flashing background, ringing lines, open mouth, shakes |
 | happy | tap the screen / *Pet the cat* button | ^^ eyes, blush, hearts, pink, purrs (`sounds/purr.flac`) |
-| working | pi works on a task in the background (Pi Agent integration) | teal, focused eyes, a spinning cog where the thought bubbles go, small nods. Stays until the result is announced (or 45 min) |
+| working | pi works on a task in the background (Pi Agent integration) | teal, focused eyes, a spinning cog where the thought bubbles go, small nods. Stays until the result is announced (or 15 min) |
+| loading | the assistant is starting up: model loading, warm-up, or the bridge unreachable (Pi Agent integration, `pi_agent_loading`) | indigo, both eyes are spinning loaders, the head sways. Ends when the assistant is ready, or a minute after the integration stops refreshing it |
 | snapping | 1 in *Snaps at 1 in N pets* (default 4, 0 = never) of those pets | hiss + growl (`sounds/growl.flac`), lunges, angry slanted eyes, ears flat, snarl, growl shake, three claw scratches swiped across the screen; then looks away offended. Ignores petting until it's over |
 
 A timer progress bar is drawn along the bottom while a timer runs.

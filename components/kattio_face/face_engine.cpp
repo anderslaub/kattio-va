@@ -35,7 +35,8 @@ const RGBf RED = rgb(0x8E1411), RED_BG = rgb(0xF58C88);        // error
 const RGBf PURPLE = rgb(0x5E1E8F), PURPLE_BG = rgb(0xCFA2F2);
 const RGBf PINK = rgb(0x8F1D4C), PINK_BG = rgb(0xF7A8C8);
 const RGBf ANGRY = rgb(0x7A2405), ANGRY_BG = rgb(0xFF9F6E);    // burnt orange: angry, but not the error red
-const RGBf TEAL = rgb(0x05555F), TEAL_BG = rgb(0x6FD0DB);      // working: calm, not listening-green or speaking-blue
+const RGBf TEAL = rgb(0x05555F), TEAL_BG = rgb(0x6FD0DB);
+const RGBf INDIGO = rgb(0x2E2A8F), INDIGO_BG = rgb(0xA9B2FA);  // loading: not any of the conversation colours      // working: calm, not listening-green or speaking-blue
 const RGBf BLUSH = rgb(0xFF8FA6);
 const RGBf TONGUE = rgb(0xFF7F93);
 
@@ -327,7 +328,7 @@ bool FaceEngine::update(float dt) {
   Spring *all[] = {&head_x_, &head_y_, &tilt_,   &squash_,  &ear_l_,       &ear_r_,   &twist_l_, &twist_r_,
                    &eye_l_,  &eye_r_,  &eye_scale_, &size_l_, &size_r_, &lid_top_, &lid_bot_,  &lid_slant_, &curve_, &gaze_x_,
                    &gaze_y_, &mouth_open_, &mouth_smile_, &mouth_w_, &zip_, &whisker_, &blush_, &cross_,
-                   &shine_,  &exclaim_, &question_, &zzz_, &dots_, &ring_, &hearts_, &claws_, &gear_};
+                   &shine_,  &exclaim_, &question_, &zzz_, &dots_, &ring_, &hearts_, &claws_, &gear_, &spinner_};
   int n = std::max(1, (int) ceilf(dt / (1.0f / 240.0f)));
   float sdt = dt / n;
   for (int i = 0; i < n; i++)
@@ -349,6 +350,7 @@ bool FaceEngine::update(float dt) {
   return vmax > 0.6f || blink_t_ >= 0 || color_moving || mood_ == MOOD_SPEAK || mood_ == MOOD_ALARM ||
          mood_ == MOOD_WAKE || mood_ == MOOD_ERROR || mood_ == MOOD_HAPPY || mood_ == MOOD_THINK ||
          mood_ == MOOD_BORED || mood_ == MOOD_SNAP || mood_ == MOOD_WORK || mood_ == MOOD_READY ||
+         mood_ == MOOD_LOADING ||
          claws_.x > 0.02f;
 }
 
@@ -361,7 +363,7 @@ void FaceEngine::apply_mood_targets_(float dt) {
   float gx = 0, gy = 0;
   float mopen = 0, smile = 0.55f, mw = 1.0f, zip = 0;
   float whisker = 0, blush = 0, cross = 0, shine = 0;
-  float exclaim = 0, question = 0, zzz = 0, dots = 0, ring = 0, hearts = 0, claws = 0, gear = 0;
+  float exclaim = 0, question = 0, zzz = 0, dots = 0, ring = 0, hearts = 0, claws = 0, gear = 0, spinner = 0;
   float breathe_amp = 0.010f, breathe_period = 4.2f;
   float lid_k = 90;
   float eye_k = 160, eye_z = 0.9f, gaze_k = 260, ear_k = 140, ear_z = 0.65f, head_k = 140, head_z = 0.55f;
@@ -542,6 +544,18 @@ void FaceEngine::apply_mood_targets_(float dt) {
       hy = 1.5f * powf(fmaxf(0.0f, sinf(time_ * 1.6f)), 6.0f);  // small nod
       ear_l = 0.35f;
       ear_r = 0.55f + 0.15f * sinf(time_ * 3.1f);
+      break;
+    }
+    case MOOD_LOADING: {
+      // Starting up: both eyes are spinning loaders, the head sways gently while it waits
+      fg_t_ = INDIGO;
+      bg_t_ = INDIGO_BG;
+      spinner = 1;
+      smile = 0.25f;
+      mw = 0.6f;
+      tilt = 0.05f * sinf(time_ * 0.8f);
+      hy = 1.2f * sinf(time_ * 1.6f);
+      ear_l = ear_r = 0.25f;
       break;
     }
     case MOOD_SPEAK: {
@@ -780,6 +794,7 @@ void FaceEngine::apply_mood_targets_(float dt) {
   hearts_.set(hearts, 40, 1.0f);
   claws_.set(claws, 25, 1.0f);
   gear_.set(gear, 60, 0.8f);
+  spinner_.set(spinner, 120, 0.9f);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -1001,6 +1016,22 @@ void FaceEngine::draw_eye_(int side, float open) {
   float ecx = 37 * sgn + gx_, ecy = 4 + gy_;
   es *= side < 0 ? size_l_.x : size_r_.x;
   float rx = 13.0f * es, ry = 16.5f * es;
+
+  // Loading: the eye becomes a spinner, a ring of dots with a fading tail (like a web page loading)
+  const float sp = clampf(spinner_.x, 0, 1);
+  if (sp > 0.03f) {
+    const int N = 8;
+    const float R = 15.0f, lead = time_ * N * 1.1f;  // ~1.1 turns per second
+    for (int i = 0; i < N; i++) {
+      float age = fmodf(lead - i + 64.0f * N, (float) N) / N;  // 0 = the leading dot
+      float a = i * 2 * PI / N - PI / 2;
+      float r = (5.2f - 2.6f * age) * sp;
+      ellipse_l(ecx + R * cosf(a) * sp, ecy + R * sinf(a) * sp, r, r, LAYER_MAIN, (1.0f - 0.7f * age) * sp);
+    }
+    open *= 1.0f - sp;
+    if (open < 0.05f)
+      return;
+  }
 
   // Error: X eyes
   float cr = cross_.x;

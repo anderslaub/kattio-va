@@ -31,6 +31,7 @@ enum Mood : uint8_t {
   MOOD_SNAP,       // petted once too often: angry eyes, snarl, growl shake, claw marks on the screen -> resting
   MOOD_WORK,       // busy with a task in the background: teal, focused eyes on a spinning cog
   MOOD_READY,      // the answer is on its way (TTS is being generated): blue, mouth ready -> SPEAK on first sound
+  MOOD_LOADING,    // the assistant is starting up (model loading / warm-up): indigo, eyes are spinning loaders
   MOOD_COUNT
 };
 
@@ -214,7 +215,7 @@ class FaceEngine {
   Spring gaze_x_, gaze_y_;
   Spring mouth_open_, mouth_smile_, mouth_w_, zip_;
   Spring whisker_, blush_, cross_, shine_;
-  Spring exclaim_, question_, zzz_, dots_, ring_, hearts_, claws_, gear_;
+  Spring exclaim_, question_, zzz_, dots_, ring_, hearts_, claws_, gear_, spinner_;
 
   // colours
   RGBf fg_{0.42f, 0.42f, 0.42f}, bg_{1, 1, 1};

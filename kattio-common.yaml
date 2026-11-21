@@ -85,6 +85,18 @@ api:
               }
             }
         - script.execute: show_working
+    # Called by the Pi Agent integration while the assistant starts up (llama.cpp loading the model, the
+    # bridge's warm-up) and once more when it is ready: the cat shows the "loading" face meanwhile. The
+    # integration repeats loading = true every few seconds; without a refresh for a minute it ends by itself.
+    - action: pi_agent_loading
+      variables:
+        loading: bool
+      then:
+        - lambda: |-
+            if (loading != id(pi_loading)) ESP_LOGI("kattio", "assistant %s", loading ? "loading" : "ready");
+            id(pi_loading) = loading;
+            id(pi_loading_refreshed) = millis();
+        - script.execute: show_working
 
 ota:
   - platform: esphome
@@ -583,11 +595,14 @@ script:
       - lambda: |-
           auto m = id(face).get_mood();
           bool busy = id(va).is_running() || id(speaker_media_player).state == media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
-          if (id(pi_working) && !busy &&
-              (m == kattio::MOOD_IDLE || m == kattio::MOOD_SLEEP || m == kattio::MOOD_BORED ||
-               m == kattio::MOOD_CONFUSED || m == kattio::MOOD_SPEAK)) {
+          bool resting = m == kattio::MOOD_IDLE || m == kattio::MOOD_SLEEP || m == kattio::MOOD_BORED ||
+                         m == kattio::MOOD_CONFUSED || m == kattio::MOOD_SPEAK;
+          // Working beats loading; both only replace a resting face, never a conversation
+          if (id(pi_working) && !busy && (resting || m == kattio::MOOD_LOADING)) {
             id(face).set_mood(kattio::MOOD_WORK);
-          } else if (!id(pi_working) && m == kattio::MOOD_WORK) {
+          } else if (!id(pi_working) && id(pi_loading) && !busy && (resting || m == kattio::MOOD_WORK)) {
+            id(face).set_mood(kattio::MOOD_LOADING);
+          } else if ((!id(pi_working) && m == kattio::MOOD_WORK) || (!id(pi_loading) && m == kattio::MOOD_LOADING)) {
             id(face).set_mood(kattio::MOOD_IDLE);
           }
 
@@ -743,6 +758,12 @@ globals:
     type: bool
     restore_value: false
     initial_value: "false"
+  - id: pi_loading
+    type: bool
+    initial_value: "false"
+  - id: pi_loading_refreshed
+    type: uint32_t
+    initial_value: "0"
   - id: pi_working_since
     type: uint32_t
     restore_value: false
@@ -785,6 +806,15 @@ interval:
             - lambda: |-
                 ESP_LOGW("kattio", "pi never reported back; leaving the working state");
                 id(pi_working) = false;
+            - script.execute: show_working
+      # "Loading" is refreshed every few seconds while the assistant starts up: without a refresh, end it
+      - if:
+          condition:
+            lambda: return id(pi_loading) && millis() - id(pi_loading_refreshed) > 60 * 1000;
+          then:
+            - lambda: |-
+                ESP_LOGW("kattio", "no loading update for a minute; leaving the loading state");
+                id(pi_loading) = false;
             - script.execute: show_working
 
 # Why and when the box last restarted (crashes show up here)
@@ -1023,6 +1053,6 @@ text_sensor:
     lambda: |-
       static const char *const NAMES[] = {"booting", "idle", "sleeping", "waking", "listening", "thinking",
                                           "speaking", "bored", "error", "muted", "offline", "alarm",
-                                          "happy", "confused", "snapping", "working", "answering"};
+                                          "happy", "confused", "snapping", "working", "answering", "loading"};
       auto m = (unsigned) id(face).get_mood();
       return std::string(m < sizeof(NAMES) / sizeof(NAMES[0]) ? NAMES[m] : "?");
