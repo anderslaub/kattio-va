@@ -62,8 +62,16 @@ api:
     key: !secret api_encryption_key
   on_client_connected:
     - lambda: id(face).set_connected(true);
+  # Any API client counts (Home Assistant, but also a log viewer): only go "offline" when none is left, or
+  # closing `esphome logs` would show the offline face while Home Assistant is still connected
   on_client_disconnected:
-    - lambda: id(face).set_connected(false);
+    - delay: 500ms
+    - if:
+        condition:
+          not:
+            api.connected:
+        then:
+          - lambda: id(face).set_connected(false);
   actions:
     # Called by the Pi Agent integration while pi works on a task in the background (and when it is done):
     # the cat shows the "working" face instead of waiting for an answer
