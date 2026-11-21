@@ -26,6 +26,10 @@ esphome:
   name: ${name}
   friendly_name: ${friendly_name}
   min_version: 2026.4.0
+  on_boot:
+    priority: -100
+    then:
+      - lambda: id(voice_out).set_timing_log(id(timing_log).state);
   project:
     name: kattio.cat-box
     version: "1.0.0"
@@ -228,13 +232,6 @@ media_player:
         file: sounds/growl.flac  # tools/make_growl.py
       - id: purr_sound
         file: sounds/purr.flac  # tools/make_purr.py
-      # waiting for the answer: tools/make_meow.py
-      - id: meow_wait_sound
-        file: sounds/meow_wait.flac
-      - id: meow_1_sound
-        file: sounds/meow_1.flac
-      - id: meow_2_sound
-        file: sounds/meow_2.flac
     on_announcement:
       # The mic and speaker share the I2S bus: release the mic before playing
       - if:
@@ -319,6 +316,7 @@ va_arbiter:
   key: !secret arbiter_key
   on_won:
     - lambda: |-
+        id(wake_ms) = millis();
         id(chat_mode) = id(multi_turn_on).state;
         id(multi_turn) = false;
         id(conv_wake_word) = wake_word;
@@ -338,7 +336,30 @@ voice_assistant:
   noise_suppression_level: 2
   auto_gain: 31dBFS
   volume_multiplier: 2.0
+  # Timing log (switch "Timing log"): every pipeline step in ms since the turn started, so a slow or cut-off
+  # answer can be pinned on STT, the conversation agent (LLM), TTS or the speaker. Pair with wygate's
+  # GET /timings and the pi agent's debug mode.
+  on_start:
+    - lambda: |-
+        id(va_t0) = millis();
+        if (id(timing_log).state) {
+          if (id(wake_ms) != 0 && millis() - id(wake_ms) < 5000)
+            ESP_LOGI("timing", "------ turn starts, %u ms after the wake word", (unsigned) (millis() - id(wake_ms)));
+          else
+            ESP_LOGI("timing", "------ turn starts (%s)", id(multi_turn) ? "follow-up" : "push to talk");
+        }
+        id(wake_ms) = 0;
+        id(first_progress) = true;
+  on_stt_vad_start:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  speech started", (unsigned) (millis() - id(va_t0)));'
+  on_intent_start:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  text sent to the conversation agent", (unsigned) (millis() - id(va_t0)));'
+  on_intent_end:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  conversation agent done", (unsigned) (millis() - id(va_t0)));'
+  on_tts_end:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  TTS audio ready: %s", (unsigned) (millis() - id(va_t0)), x.c_str());'
   on_listening:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  listening", (unsigned) (millis() - id(va_t0)));'
     - lambda: id(face).set_mood(kattio::MOOD_LISTEN);
     # Follow-up question (multi-turn): listen for "stop" alongside the request
     - if:
@@ -348,10 +369,11 @@ voice_assistant:
           - script.execute: listen_for_stop_only
           - micro_wake_word.start:
   on_stt_vad_end:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  speech ended", (unsigned) (millis() - id(va_t0)));'
     - lambda: id(face).set_mood(kattio::MOOD_THINK);
     - script.execute: release_mic_for_speaker
-    - script.execute: waiting_meows
   on_stt_end:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  transcribed: %s", (unsigned) (millis() - id(va_t0)), x.c_str());'
     - script.execute: release_mic_for_speaker
     # "...let's talk" switches on chat mode: keep listening after every answer until "stop" or silence
     - lambda: |-
@@ -366,6 +388,18 @@ voice_assistant:
           if (t.find(trig) != std::string::npos) {
             if (!id(chat_mode)) ESP_LOGI("kattio", "Chat mode on");
             id(chat_mode) = true;
+          }
+        }
+        // Dismissal phrases end the conversation right away, without an answer ("bye-bye" -> "bye bye")
+        for (auto &ch : t)
+          if (ch == '-' || ch == ',' || ch == '.' || ch == '!') ch = ' ';
+        static const char *const DISMISS[] = {"stop talking", "shut up", "bye bye", "go back to sleep",
+                                              "hold mund", "hold op med at snakke", "farvel", "gå i seng"};
+        for (auto *w : DISMISS) {
+          if (t.find(w) != std::string::npos) {
+            ESP_LOGI("kattio", "Dismissed (\"%s\"): ending the conversation", w);
+            id(stop_conversation).execute();
+            return;
           }
         }
         // Voice volume control, applied right away so the reply already plays at the new level
@@ -384,6 +418,14 @@ voice_assistant:
           id(speaker_media_player).make_call().set_volume(v).perform();
         }
   on_intent_progress:
+    - lambda: |-
+        if (id(timing_log).state && id(first_progress)) {
+          id(first_progress) = false;
+          ESP_LOGI("timing", "+%5u ms  first streamed text from the agent%s", (unsigned) (millis() - id(va_t0)),
+                   x.empty() ? "" : ", TTS streaming starts");
+        } else if (id(timing_log).state && !x.empty()) {
+          ESP_LOGI("timing", "+%5u ms  TTS streaming starts", (unsigned) (millis() - id(va_t0)));
+        }
     - if:
         condition:
           # A non-empty x means a streaming TTS response has started
@@ -393,8 +435,10 @@ voice_assistant:
   # The answer is there and its speech is being generated: "about to speak" until the first sound plays
   # (the face switches to speaking by itself then)
   on_tts_start:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  TTS started: %s", (unsigned) (millis() - id(va_t0)), x.c_str());'
     - script.execute: answer_on_its_way
   on_end:
+    - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  pipeline ended (audio may still be playing)", (unsigned) (millis() - id(va_t0)));'
     - script.execute: after_run
   on_error:
     - if:
@@ -516,46 +560,11 @@ script:
 
   - id: answer_on_its_way
     then:
-      - script.stop: waiting_meows
       - lambda: |-
           if (id(face).get_mood() != kattio::MOOD_SPEAK) id(face).set_mood(kattio::MOOD_READY);
 
-  # Waiting for the answer: a low "meow-meow" after 5 s, then a single meow now and then
-  - id: waiting_meows
-    mode: restart
-    then:
-      - delay: 5s
-      - if:
-          condition:
-            lambda: return id(face).get_mood() == kattio::MOOD_THINK && id(waiting_meows_on).state;
-          then:
-            - media_player.speaker.play_on_device_media_file:
-                media_file: meow_wait_sound
-                announcement: true
-      - while:
-          condition:
-            lambda: return id(face).get_mood() == kattio::MOOD_THINK && id(waiting_meows_on).state;
-          then:
-            - delay: !lambda return 7000 + esp_random() % 9000;
-            - if:
-                condition:
-                  lambda: return id(face).get_mood() == kattio::MOOD_THINK;
-                then:
-                  - if:
-                      condition:
-                        lambda: return (esp_random() & 1) != 0;
-                      then:
-                        - media_player.speaker.play_on_device_media_file:
-                            media_file: meow_1_sound
-                            announcement: true
-                      else:
-                        - media_player.speaker.play_on_device_media_file:
-                            media_file: meow_2_sound
-                            announcement: true
-
   - id: end_conversation
     then:
-      - script.stop: waiting_meows
       - lambda: |-
           id(multi_turn) = false;
           // Chat mode survives a background task, so the conversation continues after its result
@@ -591,17 +600,22 @@ script:
           then:
             - switch.turn_off: timer_ringing
           else:
-            - lambda: |-
-                id(multi_turn) = false;
-                id(chat_mode) = false;
-                id(face).set_mood(kattio::MOOD_BORED);
-            - voice_assistant.stop:
-            - wait_until:
-                condition:
-                  not:
-                    voice_assistant.is_running:
-                timeout: 3s
-            - script.execute: start_wake_word
+            - script.execute: stop_conversation
+
+  # "Stop", or a dismissal like "bye bye" / "go back to sleep": end the conversation (and multi-turn) now
+  - id: stop_conversation
+    then:
+      - lambda: |-
+          id(multi_turn) = false;
+          id(chat_mode) = false;
+          id(face).set_mood(kattio::MOOD_BORED);
+      - voice_assistant.stop:
+      - wait_until:
+          condition:
+            not:
+              voice_assistant.is_running:
+          timeout: 3s
+      - script.execute: start_wake_word
 
   # Screen tap: stop alarms, interrupt the cat while it talks, or pet it
   - id: on_tap
@@ -693,6 +707,16 @@ script:
           id(face).set_timer(found, frac, running);
 
 globals:
+  # Timing log: when the current turn started / the wake word was heard (millis)
+  - id: va_t0
+    type: uint32_t
+    initial_value: "0"
+  - id: wake_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: first_progress
+    type: bool
+    initial_value: "true"
   # Wake word phrase that started the current conversation (picks the HA assistant for follow-ups)
   - id: conv_wake_word
     type: std::string
@@ -866,13 +890,18 @@ switch:
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
     entity_category: config
+  # Logs the timing of every pipeline step and when the speaker runs out of audio (tag "timing")
   - platform: template
-    name: Waiting meows
-    id: waiting_meows_on
-    icon: "mdi:cat"
+    name: Timing log
+    id: timing_log
+    icon: "mdi:timer-outline"
     optimistic: true
     restore_mode: RESTORE_DEFAULT_ON
-    entity_category: config
+    entity_category: diagnostic
+    on_turn_on:
+      - lambda: id(voice_out).set_timing_log(true);
+    on_turn_off:
+      - lambda: id(voice_out).set_timing_log(false);
   - platform: template
     name: Voice enhancer
     id: voice_enhancer

@@ -65,6 +65,8 @@ class VoiceEnhancer : public Component, public speaker::Speaker {
     this->dirty_ = true;
   }
   bool is_enabled() const { return this->enabled_; }
+  /// Log when the speaker runs dry mid-stream (and a summary per stream): shows whether audio arrived too late
+  void set_timing_log(bool on) { this->timing_log_ = on; }
   void set_boost_db(float db) {
     this->boost_db_ = db;
     this->dirty_ = true;
@@ -101,6 +103,14 @@ class VoiceEnhancer : public Component, public speaker::Speaker {
   std::atomic<bool> finishing_{false};  // the stream has ended (finish() was called): let the output stop when it runs dry
   uint32_t start_ms_{0};
   std::atomic<uint32_t> last_audio_ms_{0};
+
+  // timing log: gaps where the stream ran dry and silence was played instead
+  bool timing_log_{false};
+  std::atomic<uint32_t> dry_since_ms_{0};  // 0: not dry
+  uint32_t dry_total_ms_{0};
+  uint32_t dry_count_{0};
+  uint32_t dry_longest_ms_{0};
+  uint64_t audio_bytes_{0};
 
   // settings
   bool enabled_{true};

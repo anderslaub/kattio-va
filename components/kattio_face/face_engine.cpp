@@ -26,14 +26,16 @@ inline RGBf mix(RGBf a, RGBf b, float t) { return {lerpf(a.r, b.r, t), lerpf(a.g
 const RGBf WHITE = rgb(0xFFFFFF);
 const RGBf GREY_MED = rgb(0x6E6E6E);
 const RGBf GREY_LIGHT = rgb(0xA3A3A3);
-const RGBf GREEN = rgb(0x1E9E4A), GREEN_BG = rgb(0xE3F6E9);
-const RGBf ORANGE = rgb(0xE09E00), ORANGE_BG = rgb(0xFFF8E1);  // amber: clearly not the error red
-const RGBf BLUE = rgb(0x2C78E0), BLUE_BG = rgb(0xE4EEFC);
-const RGBf RED = rgb(0xDC2F2B), RED_BG = rgb(0xFDE5E4);
-const RGBf PURPLE = rgb(0x9B45D6), PURPLE_BG = rgb(0xF3E8FC);
-const RGBf PINK = rgb(0xE0558E), PINK_BG = rgb(0xFDE8F1);
-const RGBf ANGRY = rgb(0xC2410C), ANGRY_BG = rgb(0xFFE4D6);
-const RGBf TEAL = rgb(0x0B8A99), TEAL_BG = rgb(0xDDF3F5);  // working: calm, not listening-green or speaking-blue  // burnt orange: angry, but not the error red
+// Active states get a strongly coloured background with darker line art: a pale tint washes out to white
+// when the screen is seen from the side, a saturated one stays recognisable across the room.
+const RGBf GREEN = rgb(0x0B6B2C), GREEN_BG = rgb(0x6FE08F);    // listening
+const RGBf ORANGE = rgb(0x7A4A00), ORANGE_BG = rgb(0xFFC53D);  // thinking: amber, clearly not the error red
+const RGBf BLUE = rgb(0x123F8C), BLUE_BG = rgb(0x86B4F7);      // speaking
+const RGBf RED = rgb(0x8E1411), RED_BG = rgb(0xF58C88);        // error
+const RGBf PURPLE = rgb(0x5E1E8F), PURPLE_BG = rgb(0xCFA2F2);
+const RGBf PINK = rgb(0x8F1D4C), PINK_BG = rgb(0xF7A8C8);
+const RGBf ANGRY = rgb(0x7A2405), ANGRY_BG = rgb(0xFF9F6E);    // burnt orange: angry, but not the error red
+const RGBf TEAL = rgb(0x05555F), TEAL_BG = rgb(0x6FD0DB);      // working: calm, not listening-green or speaking-blue
 const RGBf BLUSH = rgb(0xFF8FA6);
 const RGBf TONGUE = rgb(0xFF7F93);
 
@@ -56,6 +58,8 @@ FaceEngine::FaceEngine() {
   eye_l_.snap(0);
   eye_r_.snap(0);
   eye_scale_.snap(1);
+  size_l_.snap(1);
+  size_r_.snap(1);
   curve_.snap(0.6f);
   mouth_smile_.snap(0.4f);
   mouth_w_.snap(0.9f);
@@ -321,7 +325,7 @@ bool FaceEngine::update(float dt) {
 
   // ---- integrate springs (sub-stepped for stability) ----
   Spring *all[] = {&head_x_, &head_y_, &tilt_,   &squash_,  &ear_l_,       &ear_r_,   &twist_l_, &twist_r_,
-                   &eye_l_,  &eye_r_,  &eye_scale_, &lid_top_, &lid_bot_,  &lid_slant_, &curve_, &gaze_x_,
+                   &eye_l_,  &eye_r_,  &eye_scale_, &size_l_, &size_r_, &lid_top_, &lid_bot_,  &lid_slant_, &curve_, &gaze_x_,
                    &gaze_y_, &mouth_open_, &mouth_smile_, &mouth_w_, &zip_, &whisker_, &blush_, &cross_,
                    &shine_,  &exclaim_, &question_, &zzz_, &dots_, &ring_, &hearts_, &claws_, &gear_};
   int n = std::max(1, (int) ceilf(dt / (1.0f / 240.0f)));
@@ -353,7 +357,7 @@ void FaceEngine::apply_mood_targets_(float dt) {
   // Defaults
   float hx = 0, hy = 0, tilt = 0, squash = 0;
   float ear_l = 0, ear_r = 0;
-  float eye_l = 1, eye_r = 1, eye_scale = 1, lid_top = 0, lid_bot = 0, slant = 0, curve = 0;
+  float eye_l = 1, eye_r = 1, eye_scale = 1, size_l = 1, size_r = 1, lid_top = 0, lid_bot = 0, slant = 0, curve = 0;
   float gx = 0, gy = 0;
   float mopen = 0, smile = 0.55f, mw = 1.0f, zip = 0;
   float whisker = 0, blush = 0, cross = 0, shine = 0;
@@ -486,15 +490,23 @@ void FaceEngine::apply_mood_targets_(float dt) {
     case MOOD_THINK: {
       fg_t_ = ORANGE;
       bg_t_ = ORANGE_BG;
-      lid_top = 0.5f;
-      lid_bot = 0.32f;
+      // Pondering: one eye squeezed small, the other wide open, both twitching now and then
+      size_l = 0.72f;
+      size_r = 1.2f;
+      next_eye_twitch_ -= dt;
+      if (next_eye_twitch_ <= 0) {
+        next_eye_twitch_ = rnd(0.35f, 1.1f);
+        Spring &e = (rnd(0, 1) < 0.5f) ? size_l_ : size_r_;
+        e.v += rnd(0, 1) < 0.5f ? -rnd(1.2f, 2.2f) : rnd(1.2f, 2.2f);
+      }
       gx = 0.55f + 0.3f * sinf(time_ * 1.3f);
       gy = -0.6f + 0.15f * sinf(time_ * 2.1f);
       gaze_k = 60;
       dots = 1;
       smile = -0.12f;
       mw = 0.7f;
-      tilt = 0.08f;
+      // Slow side-to-side head tilt while it ponders (about 6 s per sway)
+      tilt = 0.11f * sinf(time_ * 1.05f);
       ear_l = 0.2f;
       ear_r = 0.5f;
       break;
@@ -744,6 +756,8 @@ void FaceEngine::apply_mood_targets_(float dt) {
   eye_l_.set(eye_l, eye_k, eye_z);
   eye_r_.set(eye_r, eye_k, eye_z);
   eye_scale_.set(eye_scale, 120, 0.8f);
+  size_l_.set(size_l, 220, 0.45f);
+  size_r_.set(size_r, 220, 0.45f);
   lid_top_.set(lid_top, lid_k, 1.0f);
   lid_bot_.set(lid_bot, lid_k, 1.0f);
   lid_slant_.set(slant, lid_k, 1.0f);
@@ -985,6 +999,7 @@ void FaceEngine::draw_eye_(int side, float open) {
   float sgn = (float) side;
   float es = eye_scale_.x;
   float ecx = 37 * sgn + gx_, ecy = 4 + gy_;
+  es *= side < 0 ? size_l_.x : size_r_.x;
   float rx = 13.0f * es, ry = 16.5f * es;
 
   // Error: X eyes

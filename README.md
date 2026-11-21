@@ -40,10 +40,10 @@ Restore the old firmware: `esptool --port /dev/ttyACM0 write-flash 0 backup/old_
 | sleeping | idle for *Sleep after* (10 min) | yawns, gets drowsy, then grey, eyes closed, floating zzz, deep breathing, backlight dims to 35 % |
 | waking | "Hey Kattio" | small jump, ears perk, eyes pop wide with sparkle, "!", double blink, turns green |
 | listening | STT running | green on light green, big shiny eyes, ears up, curious head tilts |
-| thinking | speech ended, waiting for the answer | orange, narrowed eyes looking up and around, thought bubbles. After 5 s a low "meow-meow", then a meow now and then (*Waiting meows* switch, `sounds/meow_*.flac` from `tools/make_meow.py`) |
+| thinking | speech ended, waiting for the answer | orange, narrowed eyes looking up and around, thought bubbles. |
 | answering | the answer is there, its speech is being generated | blue, eyes on you, small "o" mouth, pulsing dots; turns into *speaking* with the first sound that actually plays |
 | speaking | TTS playing | blue, mouth opens with the *actual* audio loudness (synced to the speaker), whiskers wiggle, head bobs |
-| bored | "Stop" in a follow-up, or silence in a follow-up, or tap while talking | rolls eyes up-right, head tilts, ears droop, sighs, fades to grey → idle |
+| bored | "Stop" or a dismissal ("bye bye", "go back to sleep") in a follow-up, or silence in a follow-up, or tap while talking | rolls eyes up-right, head tilts, ears droop, sighs, fades to grey → idle |
 | error | pipeline error | red, X eyes, head shake, frown → idle after 3.5 s |
 | confused | nothing was heard | head tilt, uneven eyes, "?" |
 | muted | mute switch | zipped mouth, ears flat |
@@ -58,8 +58,9 @@ A timer progress bar is drawn along the bottom while a timer runs.
 ## Controls
 
 * **Two wake words, two assistants:** "Hey Kattio" and "Okay Kattio". In HA, on the device, set *Wake word* + *Assistant* and *Wake word 2* + *Assistant 2* (e.g. Hey Kattio → HA's own intents, Okay Kattio → an LLM / pi assistant). Follow-up turns (multi-turn, "let's talk") stay with the assistant that was woken; push to talk uses the first one. New models: drop them in `wakewords/<name>/latest.*`, run `python3 tools/sync_wakewords.py`, rebuild.
-* **Hey Kattio**: start a conversation. *Wake word sensitivity* in HA trades range for false wakes (default: moderately). In a follow-up (multi-turn), saying **"Stop"** ends it.
+* **Hey Kattio**: start a conversation. *Wake word sensitivity* in HA trades range for false wakes (default: moderately). In a follow-up (multi-turn), saying **"Stop"** ends it. So does a sentence containing "stop talking", "shut up", "bye bye", "go back to sleep" (or "hold mund", "hold op med at snakke", "farvel", "gå i seng"): the cat ends the conversation without answering.
 * **Multi-turn** (switch, default on): the cat keeps listening after every answer until you stay silent or say "Stop". When off, it only listens again after a question, or after you said "let's talk".
+* **Timing log** (switch, diagnostic, default on): logs every pipeline step in ms since the turn started (tag `timing`), and warns when the speaker runs out of audio mid-reply or restarts under a stream. Pair it with wygate's `GET /timings` and the pi agent's debug mode to see whether a slow or broken answer came from STT, the LLM, the TTS or the box.
 * **Background tasks (pi):** when the [Pi Agent](https://github.com/anderslaub/ha-pi-agent) integration says pi carries on in the background, it calls the `pi_agent_working` API action: the cat shows the *working* face instead of waiting for an answer, and in multi-turn it listens again after the result has been announced.
 * **Diagnostics:** *Uptime* and *Reset reason* sensors show when and why the box last restarted (crashes included).
 * **Tap the screen**: pet the cat. While it's talking, a tap interrupts it. While an alarm rings, a tap stops it.

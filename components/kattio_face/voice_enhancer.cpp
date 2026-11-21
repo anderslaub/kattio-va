@@ -83,6 +83,8 @@ void VoiceEnhancer::design_filters_() {
 
 void VoiceEnhancer::start() {
   std::lock_guard<std::mutex> lock(this->mtx_);
+  // A start while a stream was still going (no finish()) means the speaker stopped under it: audio got lost
+  const bool restart = this->audio_bytes_ > 0 && !this->finishing_;
   auto info = this->audio_stream_info_;
   this->fs_ = info.get_sample_rate();
   this->block_frames_ = std::max<uint32_t>(1, this->fs_ / 100);  // 10 ms blocks
@@ -100,6 +102,13 @@ void VoiceEnhancer::start() {
   this->finish_requested_ = false;
   this->finishing_ = false;
   this->last_audio_ms_ = millis();
+  this->dry_since_ms_ = 0;
+  this->dry_total_ms_ = this->dry_count_ = this->dry_longest_ms_ = 0;
+  this->audio_bytes_ = 0;
+  if (restart)
+    ESP_LOGW("timing", "speaker: restarted in the middle of a stream (the output had stopped: audio may be lost)");
+  else if (this->timing_log_)
+    ESP_LOGI("timing", "speaker: stream started");
   this->written_blocks_ = 0;
   this->played_frames_ = 0;
   this->block_count_ = 0;
@@ -122,6 +131,19 @@ void VoiceEnhancer::stop() {
 
 void VoiceEnhancer::finish() {
   std::lock_guard<std::mutex> lock(this->mtx_);
+  if (this->timing_log_ && !this->finishing_) {
+    auto &info = this->audio_stream_info_;
+    uint32_t bps = info.get_sample_rate() * info.get_channels() * (info.get_bits_per_sample() / 8);
+    float audio_s = bps ? (float) this->audio_bytes_ / bps : 0;
+    float wall_s = (millis() - this->start_ms_) / 1000.0f;
+    if (this->dry_count_ > 0) {
+      ESP_LOGW("timing", "speaker: stream done, %.1fs of audio in %.1fs, ran dry %u times for %.2fs (longest %.2fs)",
+               audio_s, wall_s, (unsigned) this->dry_count_, this->dry_total_ms_ / 1000.0f,
+               this->dry_longest_ms_ / 1000.0f);
+    } else {
+      ESP_LOGI("timing", "speaker: stream done, %.1fs of audio in %.1fs, never ran dry", audio_s, wall_s);
+    }
+  }
   this->finishing_ = true;
   if (this->pending_len_ > 0) {
     this->finish_requested_ = true;  // loop() flushes, then finishes the output
@@ -177,6 +199,9 @@ void VoiceEnhancer::loop() {
 }
 
 void VoiceEnhancer::pad_silence_() {
+  // the output has just run dry (padding starts within a loop or two of that)
+  if (this->dry_since_ms_ == 0)
+    this->dry_since_ms_ = std::max<uint32_t>(1, millis());
   // 20 ms of silence, through the same processing (filters, level meter) as real audio so lip sync stays aligned
   auto &info = this->audio_stream_info_;
   const int ch = info.get_channels();
@@ -218,6 +243,16 @@ size_t VoiceEnhancer::play(const uint8_t *data, size_t length, TickType_t ticks_
     return 0;
   this->last_audio_ms_ = millis();
   this->finishing_ = false;
+  this->audio_bytes_ += take;
+  if (uint32_t since = this->dry_since_ms_.exchange(0)) {
+    uint32_t gap = millis() - since;
+    this->dry_total_ms_ += gap;
+    this->dry_count_++;
+    this->dry_longest_ms_ = std::max(this->dry_longest_ms_, gap);
+    if (this->timing_log_)
+      ESP_LOGW("timing", "speaker: ran dry for %.2fs mid-reply (audio came late), after %.1fs", gap / 1000.0f,
+               (since - this->start_ms_) / 1000.0f);
+  }
   memcpy(this->scratch_, data, take);
   if (bps == 16 && ch >= 1 && ch <= 2) {
     if (this->dirty_)

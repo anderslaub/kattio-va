@@ -199,6 +199,7 @@ class FaceEngine {
   float glance_end_{-1};
   float gaze_glance_x_{0}, gaze_glance_y_{0};
   float next_twitch_{6.0f};
+  float next_eye_twitch_{0.5f};
   float next_yawn_{180.0f};
   float yawn_t_{-1};
   bool pre_sleep_{false};
@@ -209,7 +210,7 @@ class FaceEngine {
   // pose springs
   Spring head_x_, head_y_, tilt_, squash_;
   Spring ear_l_, ear_r_, twist_l_, twist_r_;
-  Spring eye_l_, eye_r_, eye_scale_, lid_top_, lid_bot_, lid_slant_, curve_;
+  Spring eye_l_, eye_r_, eye_scale_, size_l_, size_r_, lid_top_, lid_bot_, lid_slant_, curve_;
   Spring gaze_x_, gaze_y_;
   Spring mouth_open_, mouth_smile_, mouth_w_, zip_;
   Spring whisker_, blush_, cross_, shine_;
