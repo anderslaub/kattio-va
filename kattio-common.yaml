@@ -774,12 +774,13 @@ touchscreen:
       - script.execute: on_tap
 
 interval:
-  # Forget a background task that was never reported done (Home Assistant restarted, bridge gone, ...)
+  # Last resort for a background task that was never reported done (Home Assistant down, ...). Normally the
+  # bridge stops a task after 10 min and the pi agent integration checks on it every 3 min, so this never fires.
   - interval: 30s
     then:
       - if:
           condition:
-            lambda: return id(pi_working) && millis() - id(pi_working_since) > 45 * 60 * 1000;
+            lambda: return id(pi_working) && millis() - id(pi_working_since) > 15 * 60 * 1000;
           then:
             - lambda: |-
                 ESP_LOGW("kattio", "pi never reported back; leaving the working state");
