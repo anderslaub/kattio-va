@@ -105,6 +105,16 @@ api:
             id(pi_loading) = loading;
             id(pi_loading_refreshed) = millis();
         - script.execute: show_working
+    # Called by the Pi Agent integration's noise filter: what was heard after the wake word (and after the cat's
+    # remark about it) was the TV or the radio, not someone talking to the cat. End the conversation without a
+    # word, also in chat mode.
+    - action: pi_agent_dismiss
+      then:
+        - lambda: |-
+            ESP_LOGI("kattio", "Background noise: ending the conversation quietly");
+            id(multi_turn) = false;
+            id(chat_mode) = false;
+            id(face).set_mood(kattio::MOOD_BORED);
 
 ota:
   - platform: esphome
@@ -341,6 +351,9 @@ va_arbiter:
         id(multi_turn) = false;
         id(conv_wake_word) = wake_word;
         id(face).set_mood(kattio::MOOD_WAKE);
+        // A wake word starts a new conversation: the Pi Agent's noise filter checks the first text of each
+        // conversation (follow-ups and chat mode keep the conversation id)
+        id(va).reset_conversation_id();
     - voice_assistant.start:
         wake_word: !lambda return wake_word;
   on_lost:
@@ -708,6 +721,7 @@ script:
                 id(multi_turn) = false;
                 id(conv_wake_word) = "";  // push to talk always uses the first assistant
                 id(face).set_mood(kattio::MOOD_WAKE);
+                id(va).reset_conversation_id();
             - voice_assistant.start:
 
   # Timer progress bar along the bottom of the screen
