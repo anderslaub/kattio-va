@@ -1,0 +1,51 @@
+# Audio hardware, half duplex: ESPHome's own I2S drivers. Microphone and speaker share one I2S bus and take
+# turns: the box cannot listen while it speaks.
+i2s_audio:
+  - id: i2s_audio_bus
+    i2s_lrclk_pin:
+      number: GPIO45
+      ignore_strapping_warning: true
+    i2s_bclk_pin: GPIO17
+    i2s_mclk_pin: GPIO2
+
+audio_adc:
+  - platform: es7210
+    i2c_id: i2c_bus
+    id: es7210_adc
+    bits_per_sample: 16bit
+    # +9 dB over the default (24 dB) so the wake word is caught from across the room
+    mic_gain: 33db
+    sample_rate: 16000
+
+audio_dac:
+  - platform: es8311
+    i2c_id: i2c_bus
+    id: es8311_dac
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+microphone:
+  - platform: i2s_audio
+    id: box_mic
+    sample_rate: 16000
+    i2s_din_pin: GPIO16
+    bits_per_sample: 16bit
+    adc_type: external
+
+speaker:
+  # The physical speaker (ES8311 DAC + NS4150 amplifier)
+  - platform: i2s_audio
+    id: box_speaker
+    i2s_dout_pin: GPIO15
+    dac_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: left
+    audio_dac: es8311_dac
+    buffer_duration: 150ms
+
+globals:
+  # the box cannot listen while it speaks (the wake word is stopped during playback)
+  - id: full_duplex
+    type: bool
+    initial_value: "false"

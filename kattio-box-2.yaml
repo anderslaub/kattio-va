@@ -5,3 +5,4 @@ substitutions:
 
 packages:
   kattio: !include kattio-common.yaml
+  audio: !include audio/full-duplex.yaml

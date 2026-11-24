@@ -19,6 +19,9 @@ substitutions:
   # Models come from wakewords/<name>/latest.* via tools/sync_wakewords.py
   wake_word_model: wakewords/hey_kattio/esphome/hey_kattio.json
   wake_word_2_model: wakewords/okay_kattio/esphome/okay_kattio.json
+  # Turn detection service ("host" or "host:port", UDP, default port 10330): the default for the "Turn detection
+  # server" setting in HA. Empty: none until it is set there (no reflash needed).
+  turn_server: ""
   # Petting: the cat snaps (growl + claw marks) at 1 in this many pets; 0 = never. Also adjustable in HA.
   snap_one_in: "4"
 
@@ -112,9 +115,18 @@ api:
       then:
         - lambda: |-
             ESP_LOGI("kattio", "Background noise: ending the conversation quietly");
+            id(listen_quietly) = false;
             id(multi_turn) = false;
             id(chat_mode) = false;
             id(face).set_mood(kattio::MOOD_BORED);
+    # Called by the Pi Agent integration when the cat heard background noise and chose to say nothing: no answer
+    # is played, but it listens once more (same conversation) for someone it knows. The integration screens
+    # what it hears then; nothing, or the TV again, and the conversation ends.
+    - action: pi_agent_listen
+      then:
+        - lambda: |-
+            ESP_LOGI("kattio", "Background noise: listening quietly for a moment");
+            id(listen_quietly) = true;
 
 ota:
   - platform: esphome
@@ -191,49 +203,19 @@ i2c:
     scl: GPIO18
     sda: GPIO8
 
-i2s_audio:
-  - id: i2s_audio_bus
-    i2s_lrclk_pin:
-      number: GPIO45
-      ignore_strapping_warning: true
-    i2s_bclk_pin: GPIO17
-    i2s_mclk_pin: GPIO2
-
-audio_adc:
-  - platform: es7210
-    i2c_id: i2c_bus
-    id: es7210_adc
-    bits_per_sample: 16bit
-    # +9 dB over the default (24 dB) so the wake word is caught from across the room
-    mic_gain: 33db
-    sample_rate: 16000
-
-audio_dac:
-  - platform: es8311
-    i2c_id: i2c_bus
-    id: es8311_dac
-    bits_per_sample: 16bit
-    sample_rate: 48000
+# The audio hardware (I2S bus, ES7210 microphone ADC, ES8311 speaker DAC) is a package chosen per box
+# (audio/half-duplex.yaml or audio/full-duplex.yaml); both define `box_mic` and `box_speaker`.
 
 microphone:
-  - platform: i2s_audio
-    id: box_mic
-    sample_rate: 16000
-    i2s_din_pin: GPIO16
-    bits_per_sample: 16bit
-    adc_type: external
+  # The voice assistant's own view of the microphone: muting it (end of turn) silences only what Home Assistant
+  # hears; the wake word and turn detection keep listening to box_mic.
+  - platform: mic_tap
+    id: va_mic
+    source: box_mic
+    # When someone interrupts the cat, Home Assistant is passed what they said from where they began (replay)
+    history: 8s
 
 speaker:
-  # The physical speaker (ES8311 DAC + NS4150 amplifier)
-  - platform: i2s_audio
-    id: box_speaker
-    i2s_dout_pin: GPIO15
-    dac_type: external
-    sample_rate: 48000
-    bits_per_sample: 16bit
-    channel: left
-    audio_dac: es8311_dac
-    buffer_duration: 150ms
   # EQ + limiter + lip-sync metering in front of it
   - platform: kattio_face
     id: voice_out
@@ -263,12 +245,20 @@ media_player:
       - id: purr_sound
         file: sounds/purr.flac  # tools/make_purr.py
     on_announcement:
-      # The mic and speaker share the I2S bus: release the mic before playing
+      - turn_stream.speaking:
+      # Half duplex (mic and speaker take turns on the I2S bus): release the mic before playing.
+      # Full duplex: keep listening, and listen for "Stop" while the cat talks.
       - if:
           condition:
-            microphone.is_capturing:
+            lambda: return id(full_duplex);
           then:
-            - micro_wake_word.stop:
+            - script.execute: listen_for_stop_only
+          else:
+            - if:
+                condition:
+                  microphone.is_capturing: box_mic
+                then:
+                  - micro_wake_word.stop:
       - if:
           condition:
             not:
@@ -279,13 +269,17 @@ media_player:
                 if (m != kattio::MOOD_ALARM && m != kattio::MOOD_SNAP && m != kattio::MOOD_HAPPY)
                   id(face).set_mood(kattio::MOOD_SPEAK);
     on_idle:
+      - turn_stream.not_speaking:
       - if:
           condition:
             not:
               voice_assistant.is_running:
           then:
+            # In a conversation the cat stays attentive until after_run decides (listen again or end): no idle
+            # blink between an answer and the next turn
             - lambda: |-
-                if (id(face).get_mood() == kattio::MOOD_SPEAK) id(face).set_mood(kattio::MOOD_IDLE);
+                if (id(face).get_mood() == kattio::MOOD_SPEAK)
+                  id(face).set_mood(id(chat_mode) && !id(pi_working) ? kattio::MOOD_LISTEN : kattio::MOOD_IDLE);
             - script.execute: show_working
             # A background task's result was just announced in chat mode: carry on with the conversation
             - if:
@@ -308,6 +302,7 @@ media_player:
 
 micro_wake_word:
   id: mww
+  microphone: box_mic
   models:
     - model: ${wake_word_model}
       id: hey_kattio
@@ -326,12 +321,19 @@ micro_wake_word:
         else:
           - if:
               condition:
-                switch.is_on: timer_ringing
+                voice_assistant.is_running:
               then:
-                - switch.turn_off: timer_ringing
+                # A follow-up is listening (only "stop" counts there): not a new conversation
+                - lambda: 'ESP_LOGD("kattio", "Ignoring \"%s\" during a follow-up", wake_word.c_str());'
               else:
-                # Several boxes may have heard it: the arbiter lets only the closest one answer
-                - lambda: id(arbiter).claim(wake_word);
+                - if:
+                    condition:
+                      switch.is_on: timer_ringing
+                    then:
+                      - switch.turn_off: timer_ringing
+                    else:
+                      # Several boxes may have heard it: the arbiter lets only the closest one answer
+                      - lambda: id(arbiter).claim(wake_word);
 
 # Only one box answers a wake word: every box scores how loud it heard it, they compare over UDP
 # and the loudest (= closest) one answers. Without other boxes around it answers immediately.
@@ -347,6 +349,8 @@ va_arbiter:
   on_won:
     - lambda: |-
         id(wake_ms) = millis();
+        // Whether to go on listening after each answer is the assistant's choice (Home Assistant's continue
+        // conversation); the "Multi-turn" switch makes every assistant keep listening
         id(chat_mode) = id(multi_turn_on).state;
         id(multi_turn) = false;
         id(conv_wake_word) = wake_word;
@@ -361,17 +365,51 @@ va_arbiter:
     - lambda: id(face).notice();
     - script.execute: start_wake_word
 
+# Turn detection (optional): while the cat listens for a request, a copy of the microphone goes to a turn detection
+# service (the "Turn detection server" setting; wygate is one), which follows the speaker's voice and says when they
+# are done, also when the TV keeps talking. The cat then mutes its microphone, so Home Assistant hears silence and
+# ends the turn, and the TV after that point never reaches the transcript. No server set, or switch "Turn
+# detection" off: Home Assistant's own end-of-speech detection alone.
+turn_stream:
+  id: turns
+  microphone: box_mic
+  server: ${turn_server}
+  server_text: turn_server
+  # The conversation ends it (end_conversation); this is only the safety net. Waiting for an answer (the agent may
+  # think for a while) is neither listening nor speaking, and must not end the session.
+  idle_timeout: 3min
+  on_end_of_turn:
+    - lambda: |-
+        ESP_LOGI("kattio", "The speaker is done (%u): Home Assistant hears silence until the turn ends", reason);
+        id(turn_muted) = true;
+        // only HA's copy, from the live audio of now on: wake word and turn detection keep listening, and
+        // words still being replayed after an interruption get through first
+        id(va_mic).silence_now();
+        id(face).set_mood(kattio::MOOD_THINK);
+    - script.execute: turn_end_guard
+  # Someone the cat knows talks to it while it speaks (full duplex; the service ignores the cat's own voice, the TV
+  # and background talk): stop talking and listen, in the same conversation. Home Assistant gets the words from
+  # where the interruption began (va_mic replays them), so the cat answers what was said. The service tells the
+  # conversation agent where the answer was cut off.
+  on_interrupt:
+    - lambda: |-
+        id(replay_ms) = speech_ms_ago + 400;  // a little before, so the first word is whole
+        id(replay_since) = millis();
+    - script.execute: interrupted
+
 voice_assistant:
   id: va
-  microphone: box_mic
+  microphone: va_mic
   media_player: speaker_media_player
   micro_wake_word: mww
   noise_suppression_level: 2
-  auto_gain: 31dBFS
-  volume_multiplier: 2.0
+  # No extra gain on the audio HA transcribes: the ES7210 already adds 33 dB (for the wake word across the
+  # room), and automatic gain lifts the far-away TV in every pause between the user's words. Was 31dBFS / 2.0.
+  auto_gain: 0dBFS
+  volume_multiplier: 1.0
   # Timing log (switch "Timing log"): every pipeline step in ms since the turn started, so a slow or cut-off
-  # answer can be pinned on STT, the conversation agent (LLM), TTS or the speaker. Pair with wygate's
-  # GET /timings and the pi agent's debug mode.
+  # answer can be pinned on STT, the conversation agent (LLM), TTS or the speaker. Pair with the speech
+  # services' own timings (e.g. wygate's GET /timings) and the conversation agent's debug log.
   on_start:
     - lambda: |-
         id(va_t0) = millis();
@@ -393,6 +431,16 @@ voice_assistant:
     - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  TTS audio ready: %s", (unsigned) (millis() - id(va_t0)), x.c_str());'
   on_listening:
     - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  listening", (unsigned) (millis() - id(va_t0)));'
+    - if:
+        condition:
+          switch.is_on: turn_detection
+        then:
+          - turn_stream.listen:
+    # After an interruption: pass on what was said since it began
+    - lambda: |-
+        if (id(replay_since) != 0 && millis() - id(replay_since) < 4000)
+          id(va_mic).replay(id(replay_ms) + (millis() - id(replay_since)));
+        id(replay_since) = 0;
     - lambda: id(face).set_mood(kattio::MOOD_LISTEN);
     # Follow-up question (multi-turn): listen for "stop" alongside the request
     - if:
@@ -403,6 +451,7 @@ voice_assistant:
           - micro_wake_word.start:
   on_stt_vad_end:
     - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  speech ended", (unsigned) (millis() - id(va_t0)));'
+    - script.execute: turn_over
     - lambda: id(face).set_mood(kattio::MOOD_THINK);
     - script.execute: release_mic_for_speaker
   on_stt_end:
@@ -473,7 +522,9 @@ voice_assistant:
   on_end:
     - lambda: 'if (id(timing_log).state) ESP_LOGI("timing", "+%5u ms  pipeline ended (audio may still be playing)", (unsigned) (millis() - id(va_t0)));'
     - script.execute: after_run
+    - script.execute: turn_over
   on_error:
+    - script.execute: turn_over
     - if:
         condition:
           lambda: return code != "duplicate_wake_up_detected";
@@ -492,6 +543,8 @@ voice_assistant:
   on_client_disconnected:
     - lambda: id(face).set_connected(false);
     - micro_wake_word.stop:
+    - script.execute: turn_over
+    - turn_stream.stop:
   on_timer_started:
     - script.execute: update_timer
   on_timer_updated:
@@ -504,51 +557,68 @@ voice_assistant:
     - switch.turn_on: timer_ringing
 
 script:
-  # (Re)start listening for "Hey Kattio" with the normal model set
-  # During a follow-up only "stop" is listened for. Remember which wake words HA has active, so they can be
-  # restored exactly (HA's Wake word / Wake word 2 settings decide which models run).
+  # The listening turn is over: stop streaming to the turn detection, and give Home Assistant's copy of the
+  # microphone its sound back (the Mute switch mutes box_mic itself)
+  - id: turn_over
+    then:
+      - turn_stream.listen_done:
+      - script.stop: turn_end_guard
+      - lambda: |-
+          if (id(turn_muted)) {
+            id(turn_muted) = false;
+            id(va_mic).unsilence();
+          }
+
+  # After an end of turn, Home Assistant should hear the silence and end the turn within a second or two. If it
+  # does not, end it from here, so the microphone is never left muted.
+  - id: turn_end_guard
+    mode: restart
+    then:
+      - delay: 5s
+      - if:
+          condition:
+            lambda: return id(turn_muted);
+          then:
+            - lambda: ESP_LOGW("kattio", "Home Assistant did not end the turn after the speaker was done; stopping it");
+            - voice_assistant.stop:
+            - script.execute: turn_over
+
+  # During a follow-up "stop" is listened for alongside the request. The wake word models are left alone:
+  # which of them run is Home Assistant's choice (Wake word / Wake word 2), ESPHome saves it in flash, and HA
+  # picks the assistant by matching the heard phrase against those settings. Switching them off here used to
+  # lose the settings (a reboot or HA reconnect mid follow-up) or put back a stale copy over HA's choice.
+  # Wake words heard during a follow-up are ignored in on_wake_word_detected instead.
   - id: listen_for_stop_only
     then:
-      - lambda: |-
-          if (!id(ww_saved)) {
-            id(ww_hey_on) = id(hey_kattio).is_enabled();
-            id(ww_okay_on) = id(okay_kattio).is_enabled();
-            id(ww_saved) = true;
-          }
-      - micro_wake_word.disable_model: hey_kattio
-      - micro_wake_word.disable_model: okay_kattio
       - micro_wake_word.enable_model: stop
 
+  # (Re)start listening for the wake words HA has active ("stop" is internal and not saved in flash)
   - id: start_wake_word
     then:
       - micro_wake_word.disable_model: stop
-      - if:
-          condition:
-            lambda: return id(ww_saved);
-          then:
-            - lambda: |-
-                id(ww_saved) = false;
-                if (id(ww_hey_on)) id(hey_kattio).enable(); else id(hey_kattio).disable();
-                if (id(ww_okay_on)) id(okay_kattio).enable(); else id(okay_kattio).disable();
       - if:
           condition:
             and:
               - switch.is_off: mute
               - not:
                   voice_assistant.is_running:
-              - not:
-                  media_player.is_announcing:
+              - or:
+                  - lambda: return id(full_duplex);
+                  - not:
+                      media_player.is_announcing:
               - not:
                   micro_wake_word.is_running:
           then:
             - micro_wake_word.start:
 
-  # Stop the wake word engine so the speaker can take the shared I2S bus
+  # Half duplex: stop the wake word engine so the speaker can take the shared I2S bus
   - id: release_mic_for_speaker
     then:
       - if:
           condition:
-            micro_wake_word.is_running:
+            and:
+              - lambda: return !id(full_duplex);
+              - micro_wake_word.is_running:
           then:
             - micro_wake_word.stop:
 
@@ -572,24 +642,38 @@ script:
       - delay: 400ms
       - if:
           condition:
-            voice_assistant.is_running:
+            or:
+              - voice_assistant.is_running:
+              # interrupted: it is listening again in a moment
+              - script.is_running: interrupted
           then:
             # The assistant asked a follow-up question: back to green/listening (on_listening)
             - lambda: id(multi_turn) = true;
           else:
             - if:
                 condition:
-                  # While pi works in the background there is nothing to answer yet: show "working" instead,
-                  # and pick the conversation up again once the result is announced (pi_agent_working)
-                  lambda: return id(chat_mode) && !id(mute).state && !id(pi_working);
+                  lambda: return id(listen_quietly) && !id(mute).state;
                 then:
-                  # Chat mode: listen again (same conversation id, so the context carries over). Pass the
-                  # wake word that started it, so HA keeps using the same assistant (pipeline 1 or 2).
-                  - lambda: id(multi_turn) = true;
+                  # The cat stayed quiet about background noise: listen once more in the same conversation
+                  - lambda: |-
+                      id(listen_quietly) = false;
+                      id(multi_turn) = true;
                   - voice_assistant.start:
                       wake_word: !lambda return id(conv_wake_word);
                 else:
-                  - script.execute: end_conversation
+                  - if:
+                      condition:
+                        # While pi works in the background there is nothing to answer yet: show "working" instead,
+                        # and pick the conversation up again once the result is announced (pi_agent_working)
+                        lambda: return id(chat_mode) && !id(mute).state && !id(pi_working);
+                      then:
+                        # Chat mode: listen again (same conversation id, so the context carries over). Pass the
+                        # wake word that started it, so HA keeps using the same assistant (pipeline 1 or 2).
+                        - lambda: id(multi_turn) = true;
+                        - voice_assistant.start:
+                            wake_word: !lambda return id(conv_wake_word);
+                      else:
+                        - script.execute: end_conversation
 
   - id: answer_on_its_way
     then:
@@ -598,6 +682,7 @@ script:
 
   - id: end_conversation
     then:
+      - turn_stream.stop:
       - lambda: |-
           id(multi_turn) = false;
           // Chat mode survives a background task, so the conversation continues after its result
@@ -638,14 +723,45 @@ script:
           else:
             - script.execute: stop_conversation
 
+  # Interrupted while talking: stop, and listen again in the same conversation (same assistant, same id)
+  - id: interrupted
+    mode: single
+    then:
+      - lambda: |-
+          ESP_LOGI("kattio", "Interrupted: listening");
+          id(multi_turn) = true;
+          id(face).set_mood(kattio::MOOD_LISTEN);
+      - voice_assistant.stop:
+      - if:
+          condition:
+            media_player.is_announcing:
+          then:
+            - media_player.stop:
+                announcement: true
+      - wait_until:
+          condition:
+            not:
+              voice_assistant.is_running:
+          timeout: 2s
+      - voice_assistant.start:
+          wake_word: !lambda return id(conv_wake_word);
+
   # "Stop", or a dismissal like "bye bye" / "go back to sleep": end the conversation (and multi-turn) now
   - id: stop_conversation
     then:
       - lambda: |-
+          id(listen_quietly) = false;
           id(multi_turn) = false;
           id(chat_mode) = false;
           id(face).set_mood(kattio::MOOD_BORED);
       - voice_assistant.stop:
+      # Full duplex: "Stop" can come while the cat is talking
+      - if:
+          condition:
+            media_player.is_announcing:
+          then:
+            - media_player.stop:
+                announcement: true
       - wait_until:
           condition:
             not:
@@ -759,18 +875,22 @@ globals:
     type: std::string
     restore_value: false
     initial_value: '""'
-  - id: ww_saved
+  # the turn detection muted the microphone (turn_stream on_end_of_turn) until the listening turn is over
+  - id: turn_muted
     type: bool
     restore_value: false
     initial_value: "false"
-  - id: ww_hey_on
+  # an interruption: how far back its words began (ms) when it came (millis, 0: none pending)
+  - id: replay_ms
+    type: uint32_t
+    initial_value: "0"
+  - id: replay_since
+    type: uint32_t
+    initial_value: "0"
+  # pi_agent_listen: after this run, listen once more without having said anything
+  - id: listen_quietly
     type: bool
-    restore_value: false
-    initial_value: "true"
-  - id: ww_okay_on
-    type: bool
-    restore_value: false
-    initial_value: "true"
+    initial_value: "false"
   - id: chat_mode
     type: bool
     restore_value: false
@@ -900,6 +1020,19 @@ binary_sensor:
           brightness: 100%
           transition_length: 300ms
 
+# Where the turn detection service runs: "host" or "host:port" (IP address or hostname). Empty: turn detection off.
+text:
+  - platform: template
+    id: turn_server
+    name: Turn detection server
+    icon: "mdi:server-network"
+    entity_category: config
+    mode: text
+    optimistic: true
+    restore_value: true
+    initial_value: ${turn_server}
+    max_length: 63
+
 button:
   - platform: factory_reset
     id: factory_reset_btn
@@ -927,15 +1060,25 @@ switch:
     restore_mode: RESTORE_DEFAULT_OFF
     entity_category: config
     on_turn_on:
-      - microphone.mute:
+      - microphone.mute: box_mic
       - micro_wake_word.stop:
       - lambda: id(face).set_muted(true);
     on_turn_off:
-      - microphone.unmute:
+      - microphone.unmute: box_mic
       - lambda: id(face).set_muted(false);
       - script.execute: start_wake_word
-  # Keep listening after every answer (until silence or "stop"), not only after questions. When off, saying
-  # "let's talk" switches it on for one conversation.
+  # Turn detection by the turn detection service (follows the speaker's voice, ends the turn when they are done
+  # even with the TV on). Off: Home Assistant's own end-of-speech detection alone.
+  - platform: template
+    name: Turn detection
+    id: turn_detection
+    icon: "mdi:account-voice"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+  # The device's own chat mode: every assistant keeps listening after each answer (until silence or "stop"). Better
+  # left off, with the choice made per assistant (e.g. Pi Agent "Keep the conversation going"): Home Assistant then
+  # tells the device to listen on. When off, saying "let's talk" switches it on for one conversation.
   - platform: template
     name: Multi-turn
     id: multi_turn_on
