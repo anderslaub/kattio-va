@@ -84,6 +84,8 @@ class VoiceEnhancer : public Component, public speaker::Speaker {
   float get_level() const;
   /// True while audio is being played
   bool is_playing() const { return this->is_running() || this->has_buffered_data(); }
+  /// How long the running output has had no new audio (ms), 0 when stopped
+  uint32_t dry_ms() const { return this->is_running() ? millis() - this->last_audio_ms_ : 0; }
 
  protected:
   void design_filters_();

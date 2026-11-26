@@ -196,7 +196,9 @@ void TurnStream::set_speaking(bool speaking) {
 }
 
 void TurnStream::stop() {
-  this->flags_ = 0;
+  // the cat may still be talking when the conversation ends: keep that, or the next conversation starts without
+  // it and wygate never listens for an interruption (it only does while the cat speaks)
+  this->flags_ = this->flags_ & FLAG_SPEAKING;
   if (!this->streaming_)
     return;
   this->send_(FLAG_STOP, nullptr, 0);
