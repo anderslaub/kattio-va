@@ -37,6 +37,11 @@ class TurnStream : public Component {
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
 
   void set_microphone_source(microphone::MicrophoneSource *src) { this->mic_source_ = src; }
+  void set_microphone(microphone::Microphone *mic) { this->mic_ = mic; }
+  /// Keep the microphone running for the whole conversation, while the assistant thinks and speaks too (full
+  /// duplex: that is when interruptions are heard). Off: only copy what others capture (half duplex, where the
+  /// microphone must give the shared audio bus to the speaker).
+  void set_hold_microphone(bool hold) { this->hold_mic_ = hold; }
   /// The service: "host" or "host:port" (IPv4 address or hostname); the text entity, when not empty, wins
   void set_server(const std::string &server) { this->server_ = server; }
   void set_server_text(text::Text *server_text) { this->server_text_ = server_text; }
@@ -75,6 +80,9 @@ class TurnStream : public Component {
   void resolve_(uint32_t now);
 
   microphone::MicrophoneSource *mic_source_{nullptr};
+  microphone::Microphone *mic_{nullptr};
+  bool hold_mic_{false};
+  bool holding_mic_{false};
   std::string server_;
   text::Text *server_text_{nullptr};
   uint16_t port_{10330};       // the default port

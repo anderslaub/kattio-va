@@ -86,9 +86,12 @@ automation.register_apply_action("turn_stream.stop", ACTION_SCHEMA, automation.A
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
-    # passive: it never starts the microphone, it only copies what the wake word / voice assistant capture anyway
+    # passive: the audio it sends is a copy of what the microphone captures for anyone
     mic_source = await microphone.microphone_source_to_code(config[CONF_MICROPHONE], passive=True)
     cg.add(var.set_microphone_source(mic_source))
+    # ... and, when told to hold it (set_hold_microphone, full duplex), keeps it running itself during a
+    # conversation (a listener of its own: needs a microphone that counts its listeners)
+    cg.add(var.set_microphone(await cg.get_variable(config[CONF_MICROPHONE][CONF_MICROPHONE])))
     socket.require_ipv4_resolve()
     cg.add(var.set_server(config[CONF_SERVER]))
     if CONF_SERVER_TEXT in config:

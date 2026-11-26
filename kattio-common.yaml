@@ -32,7 +32,11 @@ esphome:
   on_boot:
     priority: -100
     then:
-      - lambda: id(voice_out).set_timing_log(id(timing_log).state);
+      - lambda: |-
+          id(voice_out).set_timing_log(id(timing_log).state);
+          // Full duplex: the turn detection keeps the microphone on for the whole conversation, so it hears
+          // interruptions while the cat thinks and speaks (half duplex: the speaker needs the shared bus)
+          id(turns).set_hold_microphone(id(full_duplex));
   project:
     name: kattio.cat-box
     version: "1.0.0"
@@ -253,6 +257,16 @@ media_player:
             lambda: return id(full_duplex);
           then:
             - script.execute: listen_for_stop_only
+            # the wake word engine stops at the wake word: run it again, or "Stop" goes unheard during the
+            # first answer of a conversation
+            - if:
+                condition:
+                  and:
+                    - switch.is_off: mute
+                    - not:
+                        micro_wake_word.is_running:
+                then:
+                  - micro_wake_word.start:
           else:
             - if:
                 condition:

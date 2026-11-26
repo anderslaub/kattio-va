@@ -154,6 +154,10 @@ void TurnStream::start_session_() {
   this->turn_ = 0;
   this->sent_bytes_ = 0;
   this->streaming_ = true;
+  if (this->hold_mic_ && this->mic_ != nullptr && !this->holding_mic_) {
+    this->holding_mic_ = true;
+    this->mic_->start();  // one more listener: the others stopping no longer stops it
+  }
   this->send_(FLAG_START, nullptr, 0);
   ESP_LOGD(TAG, "Streaming conversation %08" PRIx32, (uint32_t) this->session_);
 }
@@ -197,6 +201,10 @@ void TurnStream::stop() {
     return;
   this->send_(FLAG_STOP, nullptr, 0);
   this->streaming_ = false;
+  if (this->holding_mic_) {
+    this->holding_mic_ = false;
+    this->mic_->stop();
+  }
   ESP_LOGD(TAG, "Conversation %08" PRIx32 " stopped after %.1f s of audio", (uint32_t) this->session_,
            this->sent_bytes_ / 32000.0f);
 }
