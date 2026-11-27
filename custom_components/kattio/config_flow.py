@@ -18,7 +18,7 @@ from homeassistant.helpers.selector import (
     TextSelector,
 )
 
-from .const import CONF_ICON, CONF_PIPELINE, CONF_TITLE, CONF_USERS, DEFAULT_OPTIONS, DOMAIN
+from .const import CONF_ICON, CONF_PIPELINE, CONF_TITLE, CONF_TURN_SERVER, CONF_USERS, DEFAULT_OPTIONS, DOMAIN
 
 
 async def _schema(hass: HomeAssistant, chosen: list[str]) -> vol.Schema:
@@ -36,6 +36,7 @@ async def _schema(hass: HomeAssistant, chosen: list[str]) -> vol.Schema:
             vol.Optional(CONF_USERS): SelectSelector(
                 SelectSelectorConfig(options=choices, multiple=True, mode=SelectSelectorMode.DROPDOWN)
             ),
+            vol.Optional(CONF_TURN_SERVER): TextSelector(),
         }
     )
 

@@ -18,6 +18,7 @@ from .const import (
     CONF_ICON,
     CONF_PIPELINE,
     CONF_TITLE,
+    CONF_TURN_SERVER,
     CONF_USERS,
     DEFAULT_OPTIONS,
     DOMAIN,
@@ -64,6 +65,8 @@ async def async_register(hass: HomeAssistant, options: dict[str, Any]) -> None:
             # the page tells others it is not for them; what the integration itself does (speech, to come)
             # checks this list on the server
             "users": list(opts[CONF_USERS] or []),
+            # a turn detection service is set (where it is stays on the server)
+            "turn_detection": bool(str(opts.get(CONF_TURN_SERVER) or "").strip()),
         },
     )
 

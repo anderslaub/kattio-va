@@ -3,7 +3,9 @@
      Build first, then serve the repository folder: python3 -m http.server 8765, open
      http://localhost:8765/panel/preview/  Options: ?dark=1 (a dark Home Assistant theme), ?demo=1 (a conversation
      already going), ?ask=Hello (sends a message when it opens), ?settings=1 (the settings open), ?admin=0 (not an administrator), ?long=1 (a long
-     reply, to try the scrolling). The microphone button runs a pretend spoken question (a tone as the answer). -->
+     reply, to try the scrolling). The microphone button starts a pretend spoken conversation (a tone as each answer):
+     ?heard=a|b|c (what is heard in each request; the default ends with "bye bye"; an empty one: nothing heard),
+     ?turns=0 (no turn detection server set), ?interrupt=1 (the first answer is interrupted), ?noend=1 (the turn detection never ends a request: nobody spoke). -->
 <html>
 <head>
 <meta charset="utf-8" />
@@ -49,6 +51,8 @@
     return "data:audio/wav;base64," + btoa(bin);
   }
   window.micBytes = 0;
+  window.turnBytes = 0;
+  window.runs = [];
   const now = Date.now() / 1000;
   window.fakeHistory = {
     h1: { user: "u1", title: "Turn on the lights in the living room", updated: now - 3600 * 3, messages: [
@@ -86,27 +90,61 @@
     },
     themes: { darkMode: params.get("dark") === "1" },
     connection: {
-      socket: { readyState: 1, send(b) { window.micBytes += b.length; } },
+      // binary messages: handler 1 = the pipeline run's audio, 2 = the turn detection relay (flags, turn, audio)
+      socket: { readyState: 1, send(b) {
+        if (b[0] === 1) { window.micBytes += b.length - 1; if (b.length === 1) window.endAudio?.(); }
+        else if (b[0] === 2) { window.turnBytes += Math.max(0, b.length - 3); window.turnState?.(b[1], b[2]); }
+      } },
       async subscribeMessage(cb, msg) {
         let i = 0;
+        // the Kattio integration's turn detection relay (?turns=0: none set): ends each request after 1.2 s of
+        // listening; ?interrupt=1: interrupts the first answer
+        if (msg.type === "kattio/voice/stream") {
+          if (params.get("turns") === "0") throw { code: "not_configured", message: "No turn detection server is set" };
+          let listening = 0, interrupted = false, timer = 0;
+          window.turnStates = [];
+          window.turnState = (flags, turn) => {
+            const last = window.turnStates[window.turnStates.length - 1];
+            if (!last || last[0] !== flags || last[1] !== turn) window.turnStates.push([flags, turn]);
+            if (flags & 4 && listening !== turn) {
+              listening = turn;
+              clearTimeout(timer);
+              if (params.get("noend") !== "1") timer = setTimeout(() => cb({ type: "end_of_turn", turn, reason: 1 }), 1200);
+            }
+            if (flags & 8 && params.get("interrupt") === "1" && !interrupted) {
+              interrupted = true;
+              setTimeout(() => cb({ type: "interrupt", turn, ago_ms: 500 }), 700);
+            }
+          };
+          setTimeout(() => cb({ type: "ready", handler_id: 2 }), 10);
+          return async () => { window.turnState = undefined; window.turnsClosed = true; };
+        }
         if (msg.start_stage === "stt") {
+          window.runs.push(msg);
           const url = toneWav();
+          const heardList = (params.get("heard") ?? "What's the weather tomorrow?|Thanks!|bye bye").split("|");
+          const heard = heardList[Math.min(window.runs.length - 1, heardList.length - 1)];
+          let cancelled = false;
           cb({ type: "run-start", data: { runner_data: { stt_binary_handler_id: 1 }, tts_output: { url, stream_response: true } } });
-          setTimeout(() => {
-            cb({ type: "stt-vad-end", data: {} });
-            cb({ type: "stt-end", data: { stt_output: { text: params.get("heard") ?? "What's the weather tomorrow?" } } });
-            if (params.get("heard") === "") { cb({ type: "error", data: { code: "stt-no-text-recognized" } }); return; }
+          const go = () => {
+            if (cancelled) return;
+            window.endAudio = undefined;
+            cb({ type: "stt-end", data: { stt_output: { text: heard } } });
+            if (heard === "") { cb({ type: "error", data: { code: "stt-no-text-recognized" } }); return; }
             cb({ type: "intent-progress", data: { chat_log_delta: { role: "assistant" } } });
             cb({ type: "intent-progress", data: { tts_start_streaming: true } });
             const words = ["Cloudy ", "in the morning, ", "some sun ", "after lunch."];
-            words.forEach((w, k) => setTimeout(() => cb({ type: "intent-progress", data: { chat_log_delta: { content: w } } }), 200 * k));
+            words.forEach((w, k) => setTimeout(() => !cancelled && cb({ type: "intent-progress", data: { chat_log_delta: { content: w } } }), 200 * k));
             setTimeout(() => {
+              if (cancelled) return;
               cb({ type: "intent-end", data: { intent_output: { conversation_id: msg.conversation_id || "c" + Date.now(), response: { response_type: "action_done", speech: { plain: { speech: words.join("") } } } } } });
               cb({ type: "tts-end", data: { tts_output: { url } } });
               cb({ type: "run-end", data: {} });
             }, 1000);
-          }, 1500);
-          return async () => {};
+          };
+          if (msg.input?.no_vad) window.endAudio = go;
+          else setTimeout(() => { if (!cancelled) { cb({ type: "stt-vad-end", data: {} }); go(); } }, 1500);
+          return async () => { cancelled = true; };
         }
         const t = setInterval(() => {
           if (i === 0) cb({ type: "run-start", data: {} });
@@ -146,7 +184,7 @@
   const el = document.querySelector("kattio-panel");
   el.hass = window.fakeHass;
   el.narrow = innerWidth < 870;
-  el.panel = { config: { title: "Kattio", pipeline: null, users: [] } };
+  el.panel = { config: { title: "Kattio", pipeline: null, users: [], turn_detection: params.get("turns") !== "0" } };
   await customElements.whenDefined("kattio-panel");
   await el.updateComplete;
   if (params.get("settings") === "1") el._settingsOpen = true;

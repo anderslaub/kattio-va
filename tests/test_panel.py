@@ -33,7 +33,7 @@ async def test_setup_adds_the_panel(hass: HomeAssistant) -> None:
     assert custom["name"] == "kattio-panel"
     assert custom["module_url"].startswith("/kattio_static/kattio-panel.js?v=")
     assert not custom["module_url"].endswith("v=0")  # the built page is there
-    assert _config(panel) == {"title": "Kattio", "pipeline": None, "users": []}
+    assert _config(panel) == {"title": "Kattio", "pipeline": None, "users": [], "turn_detection": False}
     assert not panel.require_admin
     assert entry.title == "Kattio"
 
@@ -59,7 +59,7 @@ async def test_options_change_the_panel(hass: HomeAssistant) -> None:
     panel = hass.data[DATA_PANELS][PANEL_URL_PATH]
     assert panel.sidebar_title == "Assistant"
     assert not panel.require_admin
-    assert _config(panel) == {"title": "Assistant", "pipeline": "abc123", "users": [user.id]}
+    assert _config(panel) == {"title": "Assistant", "pipeline": "abc123", "users": [user.id], "turn_detection": False}
 
 
 async def test_unload_removes_the_panel(hass: HomeAssistant) -> None:

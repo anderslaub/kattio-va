@@ -8,10 +8,26 @@ theme; in the dark, Kattio's lines turn light. The background shows through, and
 behind the face.
 
 Requests go through an Assist pipeline (the same way the voice satellites go). A typed question uses only the
-conversation step, and the answer is text only. The microphone button asks one question by voice: the full pipeline
-(speech-to-text, conversation, text-to-speech), with the answer shown and spoken. The audio goes over the page's own
-connection to Home Assistant. Tap the button again when done speaking (or wait for Home Assistant to hear the end),
-or to stop the answer.
+conversation step, and the answer is text only.
+
+**Talking.** The microphone button starts a spoken conversation, as the wake word does on a box: Kattio listens, the
+answer is shown and spoken, and Kattio listens again, until nobody says anything for 8 seconds, someone says goodbye
+("bye bye", "stop talking", "farvel", ... as on the box), or the button is tapped again. Each request is the full
+pipeline (speech-to-text, conversation, text-to-speech). The microphone stays open for the whole conversation; its
+audio goes over the page's own connection to Home Assistant. Tap the face while Kattio talks to stop it and talk.
+The screen stays on during a conversation (a phone turns the microphone off for a page out of sight; that ends the
+conversation).
+
+With a **turn detection server** set in the integration (the same service the boxes use, e.g. wygate), the
+microphone also goes there, relayed by the integration in the boxes' protocol (`turn_stream`, UDP): it decides when
+you are done (through "erhm" pauses, with a TV in the background), and when you interrupt Kattio, the answer stops
+and what you said from the start of the interruption is passed on. The phone's own echo cancellation keeps
+Kattio's voice out of the microphone. Without one, Home Assistant's own end-of-speech detection ends each request
+(after a short pause), and only a tap interrupts.
+
+The page makes each conversation's id itself (`kattio-...`), not Home Assistant: Home Assistant replaces an id it has
+forgotten (after 5 quiet minutes) with a new one, unless it is one of its own making. So a conversation stays the
+same one for the conversation agent when it is continued later, or when its first answer was interrupted.
 
 The conversation follows new text. Scroll back and it stays where you are; when more text arrives, an arrow button
 appears that jumps to the newest and follows again.
@@ -20,7 +36,7 @@ appears that jumps to the newest and follows again.
 
 - **Appearance:** Auto (follows Home Assistant), Light or Dark.
 - **Start in:** Text or Speak. Text means nothing is said out loud and the microphone stays off until tapped.
-  Speak (listening all the time, with a wake word) comes later; until then the page opens in text mode.
+  Speak (with a wake word) comes later; until then the page opens in text mode and a tap starts talking.
 - **Keep the screen on:** while the page is open (Wake Lock; most browsers have it).
 - **Greeting:** what the page says before a conversation starts; the first line is the large one.
 - **Conversation history:** on: conversations are kept in Home Assistant and listed under the history button
@@ -35,14 +51,13 @@ Administrators can also read everyone's (Mine / Everyone in the list), but not c
 The allow list applies here too, on the server.
 
 Continuing an old conversation sends its id again, and the conversation agent decides what it remembers: Home
-Assistant itself forgets a conversation after 5 quiet minutes. pi-agent (ha-pi-agent) reopens the conversation's
+Assistant itself forgets a conversation's messages after 5 quiet minutes (the id stays, see above). pi-agent (ha-pi-agent) reopens the conversation's
 saved session, for as long as it keeps those (30 days by default).
 
 The face is the box's own: the firmware's face engine (`components/kattio_face/face_engine.cpp`, unchanged), built
 as WebAssembly and drawn at the phone's resolution. Tap it to pet the cat.
 
-Coming next: Speak mode (live speech-to-text, also while Kattio talks, like the box), then attachments and the
-camera.
+Coming next: a wake word for a wall tablet (Speak mode), then attachments and the camera.
 
 ## Parts
 
@@ -51,13 +66,14 @@ camera.
 | `panel/src/` | The page (TypeScript, Lit) |
 | `panel/src/face.ts` | The face interface. The page only gives a face the state and the voice level, so a face can be swapped |
 | `panel/src/assist.ts` | A typed question through the Assist pipeline, and reading the reply from its events |
-| `panel/src/speak.ts` | A spoken question: the microphone to Home Assistant, the answer played with its loudness for the face |
+| `panel/src/talk.ts` | A spoken conversation: the microphone to Home Assistant (and the turn detection), each answer played with its loudness for the face, listening again, interruptions |
 | `panel/src/history.ts` | The conversation history, through the integration's websocket commands |
 | `panel/src/settings.ts` | The per-device settings, and keeping the screen on |
 | `panel/src/kattio-face.ts` | Kattio's face on a canvas (falls back to a plain icon where WebAssembly can't run) |
 | `panel/face/` | The WebAssembly wrapper around the firmware's face engine, and its build script |
 | `custom_components/kattio/` | The Home Assistant integration: adds the panel, holds its settings |
 | `custom_components/kattio/history.py` | Each user's conversation history, and the `kattio/history/*` websocket commands |
+| `custom_components/kattio/voice.py` | Relays a spoken conversation's microphone to the turn detection server (`kattio/voice/stream`) |
 | `custom_components/kattio/www/` | The built page (committed: Home Assistant installs from git) |
 
 The page and the integration don't depend on anything else in this repository. To remove the panel, delete
@@ -73,7 +89,10 @@ The page and the integration don't depend on anything else in this repository. T
    - **Assist pipeline:** the assistant the page talks to. Empty means the preferred pipeline.
    - **Who may use it:** Home Assistant users (admins or not). Empty means everyone with a login.
      Everyone can already use Assist in Home Assistant, so for text this only decides who sees the page.
-     What the integration adds later (Speak mode) checks the list on the server.
+     The history and the turn detection relay check the list on the server.
+   - **Turn detection server:** optional, `host` or `host:port` (UDP, port 10330 if none is given): the turn
+     detection service the boxes use. Home Assistant must be able to reach it. Empty means Home Assistant's own
+     end-of-speech detection.
 
 ## Build
 

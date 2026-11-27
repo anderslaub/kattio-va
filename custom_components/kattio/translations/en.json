@@ -8,12 +8,14 @@
           "title": "Title",
           "icon": "Icon",
           "pipeline": "Assist pipeline",
-          "users": "Who may use it"
+          "users": "Who may use it",
+          "turn_server": "Turn detection server"
         },
         "data_description": {
           "title": "Shown in the sidebar and at the top of the page",
-          "pipeline": "The assistant the page talks to: its conversation agent (and later its speech-to-text and text-to-speech). Empty: the preferred pipeline.",
-          "users": "Empty: everyone with a Home Assistant login"
+          "pipeline": "The assistant the page talks to: its conversation agent, speech-to-text and text-to-speech. Empty: the preferred pipeline.",
+          "users": "Empty: everyone with a Home Assistant login",
+          "turn_server": "Optional: a turn detection service (host or host:port, UDP, the same protocol as the Kattio boxes use). It hears when you are done speaking, also with a TV in the background, and when you interrupt the answer. Empty: Home Assistant's own end-of-speech detection."
         }
       }
     },
@@ -29,12 +31,14 @@
           "title": "Title",
           "icon": "Icon",
           "pipeline": "Assist pipeline",
-          "users": "Who may use it"
+          "users": "Who may use it",
+          "turn_server": "Turn detection server"
         },
         "data_description": {
           "title": "Shown in the sidebar and at the top of the page",
-          "pipeline": "The assistant the page talks to: its conversation agent (and later its speech-to-text and text-to-speech). Empty: the preferred pipeline.",
-          "users": "Empty: everyone with a Home Assistant login"
+          "pipeline": "The assistant the page talks to: its conversation agent, speech-to-text and text-to-speech. Empty: the preferred pipeline.",
+          "users": "Empty: everyone with a Home Assistant login",
+          "turn_server": "Optional: a turn detection service (host or host:port, UDP, the same protocol as the Kattio boxes use). It hears when you are done speaking, also with a TV in the background, and when you interrupt the answer. Empty: Home Assistant's own end-of-speech detection."
         }
       }
     }

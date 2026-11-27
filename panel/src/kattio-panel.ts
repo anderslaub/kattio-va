@@ -4,9 +4,8 @@
  * Phone (tall): the face on the top third, the conversation below. Wide screens (a tablet on its side, a desktop):
  * the face on the left, the conversation on the right.
  *
- * Typed questions are answered in text only (nothing out loud: fine in a supermarket). The microphone button asks
- * one question by voice and the answer is also spoken. Listening all the time (Speak mode, for a tablet on the wall)
- * comes later. Settings are per device: the gear in the top bar.
+ * Typed questions are answered in text only (nothing out loud: fine in a supermarket). The microphone button starts
+ * a spoken conversation, as with a box (talk.ts). A wake word (Speak mode, for a tablet on the wall) comes later. Settings are per device: the gear in the top bar.
  */
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { askText, type Hass } from "./assist";
@@ -28,16 +27,19 @@ import {
   getConversation,
   listConversations,
   saveConversation,
+  newConversationId,
   whenText,
   type ConversationSummary,
 } from "./history";
-import { askVoice, microphoneSupported, type VoiceTurn } from "./speak";
+import { microphoneSupported, startTalk, type Talk, type TalkState } from "./talk";
 
 interface PanelConfig {
   title?: string;
   pipeline?: string | null;
   /** Home Assistant user ids who may use the page; empty: everyone */
   users?: string[];
+  /** The integration relays a spoken conversation to a turn detection service */
+  turn_detection?: boolean;
 }
 
 interface Message {
@@ -64,8 +66,8 @@ const makeFace: FaceFactory = kattioFace(placeholderFace);
 
 let nextId = 1;
 
-/** Where a spoken question is */
-type VoicePhase = "off" | "starting" | "listening" | "thinking" | "speaking";
+/** Where a spoken conversation is */
+type VoicePhase = "off" | TalkState;
 
 class KattioPanel extends LitElement {
   static properties = {
@@ -111,7 +113,7 @@ class KattioPanel extends LitElement {
   private _smooth = false;
   /** A finger is on the conversation: the page doesn't scroll it meanwhile */
   private _touching = false;
-  private _voice?: VoiceTurn;
+  private _talk?: Talk;
   private _voicePhase: VoicePhase = "off";
   /** The page has decided what to show first (needs hass: who the user is) */
   private _started = false;
@@ -165,7 +167,7 @@ class KattioPanel extends LitElement {
     this._resize.disconnect();
     this._logResize.disconnect();
     this._observedLog = undefined;
-    this._voice?.cancel();
+    this._talk?.stop();
     window.removeEventListener("keydown", this._onWindowKey);
     window.removeEventListener("resize", this._fitHeight);
     window.visualViewport?.removeEventListener("resize", this._fitHeight);
@@ -183,7 +185,10 @@ class KattioPanel extends LitElement {
       const theme = this._settings.theme;
       this._dark = theme === "dark" || (theme === "auto" && !!this.hass?.themes?.darkMode);
     }
-    if (changed.has("_settings")) this._awake.set(this._settings.keepAwake);
+    // the screen stays on while talking (a phone stops the microphone of a dark screen)
+    if (changed.has("_settings") || changed.has("_voicePhase")) {
+      this._awake.set(this._settings.keepAwake || this._voicePhase !== "off");
+    }
   }
 
   protected updated(changed: PropertyValues): void {
@@ -221,7 +226,7 @@ class KattioPanel extends LitElement {
     return html`
       ${this._toolbar(true)}
       <div class="body">
-        <div class="face" aria-hidden="true"></div>
+        <div class="face" aria-hidden="true" @click=${this._onFaceTap}></div>
         <div class="talk">
           <div class="log">
             <div
@@ -306,10 +311,10 @@ class KattioPanel extends LitElement {
     const mic = microphoneSupported();
     const [speakIcon, speakLabel] =
       phase === "off"
-        ? ["mdi:microphone", mic ? "Speak" : "Speaking needs the microphone, which this browser doesn't allow here"]
+        ? ["mdi:microphone", mic ? `Talk with ${this._title}` : "Talking needs the microphone, which this browser doesn't allow here"]
         : phase === "listening"
-          ? ["mdi:microphone", "Done speaking"]
-          : ["mdi:stop", "Stop"];
+          ? ["mdi:microphone", "End the conversation"]
+          : ["mdi:stop", "End the conversation"];
     return html`<div class="composer">
       <div class="field">
         <button class="icon small" title="Attach (coming later)" aria-label="Attach" disabled>
@@ -375,8 +380,9 @@ class KattioPanel extends LitElement {
           </div>
           <div class="note">
             ${s.start === "speak"
-              ? html`Listening all the time (and a wake word) comes in a later version. Until then the page opens in
-                  text mode: tap the microphone to talk.`
+              ? html`A wake word comes in a later version. Until then the page opens in text mode: tap the
+                  microphone to start talking (it listens again after every answer, until you're quiet or say
+                  "bye bye").`
               : html`Opens quietly: nothing is said out loud, and the microphone stays off until you tap it.`}
           </div>
         </div>
@@ -645,7 +651,7 @@ class KattioPanel extends LitElement {
     await askText(
       this.hass,
       text,
-      { pipeline: this._config.pipeline, conversationId: this._conversationId },
+      { pipeline: this._config.pipeline, conversationId: this._ensureConversationId() },
       {
         onText: (more, newMessage) => {
           reply.text += (newMessage && reply.text ? "\n\n" : "") + more;
@@ -674,102 +680,124 @@ class KattioPanel extends LitElement {
   }
 
   private readonly _onSpeak = () => {
-    if (this._voicePhase === "off") void this._askByVoice();
-    else if (this._voicePhase === "listening") this._voice?.stopListening();
-    else this._voice?.cancel();
+    if (this._voicePhase === "off") this._startTalk();
+    else this._talk?.stop();
   };
 
-  /** One question by voice: what was heard, then the answer as text and out loud */
-  private async _askByVoice(): Promise<void> {
-    if (this._busy || !this.hass) return;
+  /** A tap on the face while Kattio talks: stop and listen (as tapping a box) */
+  private readonly _onFaceTap = () => {
+    if (this._voicePhase === "speaking") this._talk?.interrupt();
+  };
+
+  /**
+   * A spoken conversation, as with a box: listen, answer out loud, listen again, until nobody speaks, a goodbye or a
+   * tap. Each request shows as what was heard and the answer.
+   */
+  private _startTalk(): void {
+    if (this._busy || !this.hass || this._talk) return;
     this._busy = true;
     this._voicePhase = "starting";
-    const heard: Message = { id: nextId++, role: "user", text: "", pending: true };
-    const reply: Message = { id: nextId++, role: "assistant", text: "", pending: true };
-    let replyShown = false;
-    let speaking = false;
-    let failed = false;
     this._smooth = true;
     this._follow = true;
     this._behind = false;
-    this._messages = [...this._messages, heard];
-    this._face?.setState("listening");
+    let heard: Message | undefined;
+    let reply: Message | undefined;
+    let failed = false;
 
     const refresh = () => (this._messages = [...this._messages]);
+    /** The request's answer, shown once there is something of it */
     const showReply = () => {
-      if (replyShown) return;
-      replyShown = true;
-      this._messages = [...this._messages, reply];
+      if (!reply) {
+        reply = { id: nextId++, role: "assistant", text: "", pending: true };
+        this._messages = [...this._messages, reply];
+      }
+      return reply;
     };
-    const turn = askVoice(
+    /** What is still on its way stays out (or stays as far as it got) */
+    const settle = () => {
+      this._messages = this._messages
+        .filter((m) => !m.pending || m.text)
+        .map((m) => (m.pending ? { ...m, pending: false } : m));
+    };
+
+    this._talk = startTalk(
       this.hass,
-      { pipeline: this._config.pipeline, conversationId: this._conversationId },
       {
-        onListening: () => (this._voicePhase = "listening"),
+        pipeline: this._config.pipeline,
+        conversationId: () => this._ensureConversationId(),
+        turnDetection: !!this._config.turn_detection,
+      },
+      {
+        onState: (state) => {
+          this._voicePhase = state;
+          if (state !== "starting") this._face?.setState(state);
+          else this._face?.setState("listening");
+        },
+        onTurn: () => {
+          settle();
+          heard = { id: nextId++, role: "user", text: "", pending: true };
+          reply = undefined;
+          this._messages = [...this._messages, heard];
+        },
         onHeard: (text) => {
+          if (!heard) return;
           if (!text) {
-            this._messages = [
-              ...this._messages.filter((m) => m !== heard),
-              { id: nextId++, role: "note", text: "I didn't catch that." },
-            ];
-            this._face?.setState("idle");
-            return;
+            this._messages = this._messages.filter((m) => m !== heard);
+          } else {
+            heard.text = text;
+            heard.pending = false;
+            showReply();
+            refresh();
           }
-          heard.text = text;
-          heard.pending = false;
-          this._voicePhase = "thinking";
-          this._face?.setState("thinking");
-          showReply();
-          refresh();
         },
         onText: (more, newMessage) => {
-          showReply();
-          reply.text += (newMessage && reply.text ? "\n\n" : "") + more;
+          const r = showReply();
+          r.text += (newMessage && r.text ? "\n\n" : "") + more;
           refresh();
         },
         onDone: ({ speech, conversationId }) => {
-          showReply();
-          if (!reply.text.trim()) reply.text = speech;
-          reply.pending = false;
+          const r = showReply();
+          if (!r.text.trim()) r.text = speech;
+          r.pending = false;
+          if (!r.text.trim()) this._messages = this._messages.filter((m) => m !== r);
           this._conversationId = conversationId ?? this._conversationId;
-          if (!speaking) this._face?.setState("idle");
           refresh();
+          this._save();
         },
         onError: (message) => {
           failed = true;
-          this._messages = [
-            ...this._messages.filter((m) => (m !== heard && m !== reply) || m.text),
-            { id: nextId++, role: "error", text: message },
-          ];
+          settle();
+          this._messages = [...this._messages, { id: nextId++, role: "error", text: message }];
           this._face?.setState("error");
         },
-        onSpeaking: (on) => {
-          speaking = on;
-          if (on) {
-            this._voicePhase = "speaking";
-            this._face?.setState("speaking");
-          } else if (!failed) {
-            this._face?.setState(reply.pending ? "thinking" : "idle");
+        onInterrupted: () => {
+          if (reply) {
+            reply.text = reply.text.trimEnd() + " …";
+            reply.pending = false;
+            refresh();
           }
         },
         onLevel: (level) => this._face?.setLevel(level),
+        onEnd: (reason) => {
+          const stoppedMidway = !!heard?.text && !!reply?.pending;
+          settle();
+          if (reason === "stopped" && stoppedMidway) {
+            this._messages = [...this._messages, { id: nextId++, role: "note", text: "Stopped." }];
+          }
+          if (!failed) this._face?.setState("idle");
+          this._talk = undefined;
+          this._voicePhase = "off";
+          this._busy = false;
+          this._save();
+        },
       },
     );
-    this._voice = turn;
-    await turn.done;
-    this._voice = undefined;
-    // stopped early: what was on its way stays out
-    const stopped = heard.pending || reply.pending;
-    this._messages = this._messages
-      .filter((m) => !m.pending || m.text)
-      .map((m) => (m.pending ? { ...m, pending: false } : m));
-    if (stopped && heard.text && !failed) {
-      this._messages = [...this._messages, { id: nextId++, role: "note", text: "Stopped." }];
-    }
-    if (!failed) this._face?.setState("idle");
-    this._voicePhase = "off";
-    this._busy = false;
-    this._save();
+  }
+
+  /** The conversation's id, made on its first request */
+  private _ensureConversationId(): string {
+    this._conversationId ??= newConversationId();
+    return this._conversationId;
   }
 
   private _newConversation(): void {

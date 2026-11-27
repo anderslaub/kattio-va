@@ -55,3 +55,16 @@ export function whenText(updated: number, now = Date.now()): string {
   if (t.getTime() >= today.getTime() - 6 * day) return t.toLocaleDateString([], { weekday: "short" });
   return t.toLocaleDateString([], { day: "numeric", month: "short" });
 }
+
+/**
+ * A new conversation's id, made by the page. Not one of Home Assistant's own (ULIDs): Home Assistant forgets a
+ * conversation after a few quiet minutes and replaces a ULID it no longer knows with a new one, while an id of the
+ * page's own making is kept as it is. So a conversation stays the same one (for the assistant too, which keeps its
+ * memory of it by this id) when it is continued later, or when its first answer was cut off before it came.
+ */
+export function newConversationId(): string {
+  const random = new Uint8Array(8);
+  crypto.getRandomValues(random);
+  const hex = [...random].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `kattio-${Date.now().toString(36)}-${hex}`;
+}
