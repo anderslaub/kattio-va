@@ -4,14 +4,34 @@
  * Phone (tall): the face on the top third, the conversation below. Wide screens (a tablet on its side, a desktop):
  * the face on the left, the conversation on the right.
  *
- * It opens in text mode unless this device's settings say otherwise (Speak mode, for a tablet on the wall, comes in
- * the next version). Settings are per device: the gear in the top bar.
+ * Typed questions are answered in text only (nothing out loud: fine in a supermarket). The microphone button asks
+ * one question by voice and the answer is also spoken. Listening all the time (Speak mode, for a tablet on the wall)
+ * comes later. Settings are per device: the gear in the top bar.
  */
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { askText, type Hass } from "./assist";
 import { placeholderFace, type Face, type FaceFactory } from "./face";
 import { kattioFace } from "./kattio-face";
-import { DEFAULT_SETTINGS, ScreenAwake, loadSettings, saveSettings, type Settings } from "./settings";
+import {
+  DEFAULT_SETTINGS,
+  GREETING_MAX,
+  ScreenAwake,
+  loadLast,
+  loadSettings,
+  saveLast,
+  saveSettings,
+  type SavedConversation,
+  type Settings,
+} from "./settings";
+import {
+  deleteConversation,
+  getConversation,
+  listConversations,
+  saveConversation,
+  whenText,
+  type ConversationSummary,
+} from "./history";
+import { askVoice, microphoneSupported, type VoiceTurn } from "./speak";
 
 interface PanelConfig {
   title?: string;
@@ -22,7 +42,8 @@ interface PanelConfig {
 
 interface Message {
   id: number;
-  role: "user" | "assistant" | "error";
+  /** note: something about the conversation, not part of it (nothing heard, an answer stopped) */
+  role: "user" | "assistant" | "error" | "note";
   text: string;
   pending?: boolean;
 }
@@ -33,8 +54,8 @@ interface HassWithTheme extends Hass {
 
 const STORE_KEY = "kattio-panel:conversation:v1";
 const KEEP_MESSAGES = 100;
-/** Following the newest message: only when the reader is this close to the end (else they are reading back) */
-const STICK_PX = 96;
+/** At the end of the conversation when this close to it */
+const END_PX = 24;
 /** The face and the conversation side by side from this width (and when wider than tall) */
 const WIDE_PX = 720;
 
@@ -42,6 +63,9 @@ const WIDE_PX = 720;
 const makeFace: FaceFactory = kattioFace(placeholderFace);
 
 let nextId = 1;
+
+/** Where a spoken question is */
+type VoicePhase = "off" | "starting" | "listening" | "thinking" | "speaking";
 
 class KattioPanel extends LitElement {
   static properties = {
@@ -53,6 +77,14 @@ class KattioPanel extends LitElement {
     _draft: { state: true },
     _settings: { state: true },
     _settingsOpen: { state: true },
+    _behind: { state: true },
+    _historyOpen: { state: true },
+    _history: { state: true },
+    _historyEveryone: { state: true },
+    _historyError: { state: true },
+    _confirmDelete: { state: true },
+    _readOnly: { state: true },
+    _voicePhase: { state: true },
     _wide: { type: Boolean, reflect: true, attribute: "wide" },
     _dark: { type: Boolean, reflect: true, attribute: "dark" },
   };
@@ -70,8 +102,35 @@ class KattioPanel extends LitElement {
   private _dark = false;
   private _conversationId: string | null = null;
   private _face?: Face;
-  private _stick = true;
+  /** Scrolling along with the conversation; off once the reader scrolls back, on again at its end */
+  private _follow = true;
+  /** A scroll the page started is under way (so it isn't taken for the reader's) */
+  private _autoScroll = false;
+  /** New text below while the reader is further up: the jump-to-the-end button shows */
+  private _behind = false;
   private _smooth = false;
+  /** A finger is on the conversation: the page doesn't scroll it meanwhile */
+  private _touching = false;
+  private _voice?: VoiceTurn;
+  private _voicePhase: VoicePhase = "off";
+  /** The page has decided what to show first (needs hass: who the user is) */
+  private _started = false;
+  private _historyOpen = false;
+  /** The list in the history sheet; null while it loads */
+  private _history: ConversationSummary[] | null = null;
+  /** An administrator looking at everyone's conversations */
+  private _historyEveryone = false;
+  private _historyError = "";
+  /** Asked once before deleting: the conversation whose delete button was tapped */
+  private _confirmDelete: string | null = null;
+  /** Reading someone else's conversation (an administrator): whose; the user's own is kept aside meanwhile */
+  private _readOnly: { name: string } | null = null;
+  private _ownAside?: { messages: Message[]; conversationId: string | null };
+  private _observedLog?: Element;
+  /** The conversation's box changes size (the keyboard opens, the window turns): stay at the end if following */
+  private readonly _logResize = new ResizeObserver(() => {
+    if (this._follow) this._scrollToEnd(false);
+  });
   private readonly _awake = new ScreenAwake();
   private readonly _resize = new ResizeObserver(([entry]) => {
     const { width, height } = entry.contentRect;
@@ -93,7 +152,6 @@ class KattioPanel extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
-    this._restore();
     this._settings = loadSettings();
     this._resize.observe(this);
     window.addEventListener("keydown", this._onWindowKey);
@@ -105,6 +163,9 @@ class KattioPanel extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this._resize.disconnect();
+    this._logResize.disconnect();
+    this._observedLog = undefined;
+    this._voice?.cancel();
     window.removeEventListener("keydown", this._onWindowKey);
     window.removeEventListener("resize", this._fitHeight);
     window.visualViewport?.removeEventListener("resize", this._fitHeight);
@@ -114,20 +175,28 @@ class KattioPanel extends LitElement {
   }
 
   protected willUpdate(changed: PropertyValues): void {
+    if (!this._started && this.hass?.user?.id) {
+      this._started = true;
+      void this._start();
+    }
     if (changed.has("hass") || changed.has("_settings")) {
       const theme = this._settings.theme;
       this._dark = theme === "dark" || (theme === "auto" && !!this.hass?.themes?.darkMode);
     }
     if (changed.has("_settings")) this._awake.set(this._settings.keepAwake);
-    // keep following the conversation only if the reader was at its end
-    if (changed.has("_messages")) {
-      const box = this.renderRoot?.querySelector<HTMLElement>(".messages");
-      this._stick = !box || box.scrollHeight - box.scrollTop - box.clientHeight < STICK_PX;
-    }
   }
 
   protected updated(changed: PropertyValues): void {
-    if (changed.has("_messages") && this._stick) this._scrollToEnd(this._smooth);
+    const log = this._log;
+    if (log !== this._observedLog) {
+      this._logResize.disconnect();
+      if (log) this._logResize.observe(log);
+      this._observedLog = log ?? undefined;
+    }
+    if (changed.has("_messages")) {
+      if (this._follow && !this._touching) this._scrollToEnd(this._smooth);
+      else if (this._messages.length) this._behind = true;
+    }
     this._smooth = false;
     // the face is made once its place exists (not when the page is not for this user)
     const host = this.renderRoot.querySelector<HTMLElement>(".face");
@@ -154,20 +223,33 @@ class KattioPanel extends LitElement {
       <div class="body">
         <div class="face" aria-hidden="true"></div>
         <div class="talk">
-          <div class="messages" role="log" aria-live="polite">
-            <div class="column">
-              ${this._messages.length === 0
-                ? html`<div class="empty">
-                    <div class="empty-title">Hi, I'm ${this._title}.</div>
-                    <div>Write to me below. You can pet me too.</div>
-                  </div>`
-                : this._messages.map((m) => this._message(m))}
+          <div class="log">
+            <div
+              class="messages"
+              role="log"
+              aria-live="polite"
+              @scroll=${this._onScroll}
+              @wheel=${this._onWheel}
+              @touchstart=${this._onTouch}
+              @touchend=${this._onTouchEnd}
+              @touchcancel=${this._onTouchEnd}
+              @pointerdown=${this._onReaderScroll}
+              @keydown=${this._onLogKey}
+            >
+              <div class="column">
+                ${this._messages.length === 0 ? this._empty() : this._messages.map((m) => this._message(m))}
+              </div>
             </div>
+            ${this._behind
+              ? html`<button class="jump" title="Go to the newest" aria-label="Go to the newest" @click=${this._jump}>
+                  <ha-icon icon="mdi:arrow-down"></ha-icon>
+                </button>`
+              : nothing}
           </div>
-          ${this._composer()}
+          ${this._readOnly ? this._readOnlyBar() : this._composer()}
         </div>
       </div>
-      ${this._settingsOpen ? this._settingsSheet() : nothing}
+      ${this._settingsOpen ? this._settingsSheet() : nothing} ${this._historyOpen ? this._historySheet() : nothing}
     `;
   }
 
@@ -175,12 +257,17 @@ class KattioPanel extends LitElement {
     return html`<div class="toolbar">
       <ha-menu-button .hass=${this.hass} .narrow=${this.narrow}></ha-menu-button>
       <div class="title">${this._title}</div>
+      ${actions && this._settings.history
+        ? html`<button class="icon" title="Conversations" aria-label="Conversations" @click=${this._openHistory}>
+            <ha-icon icon="mdi:history"></ha-icon>
+          </button>`
+        : nothing}
       ${actions
         ? html`<button
               class="icon"
               title="New conversation"
               aria-label="New conversation"
-              ?disabled=${this._busy || this._messages.length === 0}
+              ?disabled=${this._busy || (this._messages.length === 0 && !this._readOnly)}
               @click=${this._newConversation}
             >
               <ha-icon icon="mdi:message-plus-outline"></ha-icon>
@@ -192,14 +279,37 @@ class KattioPanel extends LitElement {
     </div>`;
   }
 
+  private get _defaultGreeting(): string {
+    return `Hi, I'm ${this._title}.\nWrite or talk to me below. You can pet me too.`;
+  }
+
+  /** The greeting before a conversation: this device's own, or the page's */
+  private _empty() {
+    const text = this._settings.greeting.trim() || this._defaultGreeting;
+    const [first, ...rest] = text.split("\n");
+    return html`<div class="empty">
+      <div class="empty-title">${first}</div>
+      ${rest.length ? html`<div class="empty-text">${rest.join("\n").trim()}</div>` : nothing}
+    </div>`;
+  }
+
   private _message(m: Message) {
+    const busy = m.role === "user" ? "Listening" : "Thinking";
     // no whitespace around the text: the bubble keeps the text's own line breaks (pre-wrap)
     return html`<div class="msg ${m.role}">${m.text ||
-      (m.pending ? html`<span class="dots" aria-label="Thinking"><i></i><i></i><i></i></span>` : nothing)}</div>`;
+      (m.pending ? html`<span class="dots" aria-label=${busy}><i></i><i></i><i></i></span>` : nothing)}</div>`;
   }
 
   private _composer() {
     const canSend = !this._busy && !!this._draft.trim();
+    const phase = this._voicePhase;
+    const mic = microphoneSupported();
+    const [speakIcon, speakLabel] =
+      phase === "off"
+        ? ["mdi:microphone", mic ? "Speak" : "Speaking needs the microphone, which this browser doesn't allow here"]
+        : phase === "listening"
+          ? ["mdi:microphone", "Done speaking"]
+          : ["mdi:stop", "Stop"];
     return html`<div class="composer">
       <div class="field">
         <button class="icon small" title="Attach (coming later)" aria-label="Attach" disabled>
@@ -219,8 +329,14 @@ class KattioPanel extends LitElement {
           <ha-icon icon="mdi:send"></ha-icon>
         </button>
       </div>
-      <button class="icon speak" title="Speak (coming in the next version)" aria-label="Speak" disabled>
-        <ha-icon icon="mdi:microphone"></ha-icon>
+      <button
+        class="icon speak ${phase}"
+        title=${speakLabel}
+        aria-label=${speakLabel}
+        ?disabled=${phase === "off" && (this._busy || !mic)}
+        @click=${this._onSpeak}
+      >
+        <ha-icon icon=${speakIcon}></ha-icon>
       </button>
     </div>`;
   }
@@ -259,10 +375,48 @@ class KattioPanel extends LitElement {
           </div>
           <div class="note">
             ${s.start === "speak"
-              ? html`Speak mode comes in the next version. Until then the page opens in text mode.`
-              : html`Opens quietly: nothing is said out loud, and the microphone stays off.`}
+              ? html`Listening all the time (and a wake word) comes in a later version. Until then the page opens in
+                  text mode: tap the microphone to talk.`
+              : html`Opens quietly: nothing is said out loud, and the microphone stays off until you tap it.`}
           </div>
         </div>
+        <div class="setting">
+          <label class="label" for="greeting">Greeting</label>
+          <textarea
+            id="greeting"
+            rows="3"
+            maxlength=${GREETING_MAX}
+            placeholder=${this._defaultGreeting}
+            .value=${s.greeting}
+            @input=${(e: Event) => this._set("greeting", (e.target as HTMLTextAreaElement).value)}
+          ></textarea>
+          <div class="note">Shown before a conversation starts; the first line large. Empty: the one above.</div>
+        </div>
+        <label class="setting toggle">
+          <div>
+            <div class="label">Conversation history</div>
+            <div class="note">Your recent conversations, kept in Home Assistant, to pick up again.</div>
+          </div>
+          ${this._switch("history")}
+        </label>
+        <label class="setting toggle">
+          <div>
+            <div class="label">Continue the last conversation</div>
+            <div class="note">When the page opens. Off: a new conversation each time.</div>
+          </div>
+          ${this._switch("resume")}
+        </label>
+        <label class="setting toggle sub ${s.resume ? "" : "off"}">
+          <div>
+            <div class="label">From any device</div>
+            <div class="note">
+              ${s.history
+                ? "Your most recent conversation, wherever it was. Off: the last one on this device."
+                : "Needs the conversation history."}
+            </div>
+          </div>
+          ${this._switch("resumeAnyDevice", !s.resume || !s.history)}
+        </label>
         <label class="setting toggle">
           <div>
             <div class="label">Keep the screen on</div>
@@ -284,6 +438,167 @@ class KattioPanel extends LitElement {
       </div>`;
   }
 
+  private _switch(key: "history" | "resume" | "resumeAnyDevice", disabled = false) {
+    return html`<input
+      type="checkbox"
+      role="switch"
+      .checked=${this._settings[key] && !disabled}
+      ?disabled=${disabled}
+      @change=${(e: Event) => this._set(key, (e.target as HTMLInputElement).checked)}
+    />`;
+  }
+
+  /** Someone else's conversation, read only (an administrator); back to one's own */
+  private _readOnlyBar() {
+    return html`<div class="readonly">
+      <ha-icon icon="mdi:eye-outline"></ha-icon>
+      <div class="readonly-text">${this._readOnly!.name || "Someone else"}'s conversation, read only</div>
+      <button class="pill" @click=${this._leaveReadOnly}>Back to mine</button>
+    </div>`;
+  }
+
+  private _historySheet() {
+    const admin = !!this.hass?.user?.is_admin;
+    const list = this._history;
+    return html`<div class="scrim" @click=${() => (this._historyOpen = false)}></div>
+      <div class="sheet history" role="dialog" aria-modal="true" aria-labelledby="history-title">
+        <div class="sheet-head">
+          <div id="history-title" class="sheet-title">Conversations</div>
+          <button class="icon" aria-label="Close" title="Close" @click=${() => (this._historyOpen = false)}>
+            <ha-icon icon="mdi:close"></ha-icon>
+          </button>
+        </div>
+        ${admin
+          ? html`<div class="choices" role="radiogroup" aria-label="Whose">
+              <button
+                class="choice ${this._historyEveryone ? "" : "on"}"
+                role="radio"
+                aria-checked=${this._historyEveryone ? "false" : "true"}
+                @click=${() => this._loadHistory(false)}
+              >
+                Mine
+              </button>
+              <button
+                class="choice ${this._historyEveryone ? "on" : ""}"
+                role="radio"
+                aria-checked=${this._historyEveryone ? "true" : "false"}
+                @click=${() => this._loadHistory(true)}
+              >
+                Everyone
+              </button>
+            </div>`
+          : nothing}
+        <div class="convs">
+          ${this._historyError
+            ? html`<div class="conv-empty">${this._historyError}</div>`
+            : list === null
+              ? html`<div class="conv-empty">Loading…</div>`
+              : list.length === 0
+                ? html`<div class="conv-empty">No conversations yet.</div>`
+                : list.map((c) => this._conversationRow(c))}
+        </div>
+        <div class="sheet-foot">The 20 most recent are kept for each person.</div>
+      </div>`;
+  }
+
+  private _conversationRow(c: ConversationSummary) {
+    const current = c.id === this._conversationId && !this._readOnly;
+    const confirming = this._confirmDelete === c.id;
+    return html`<div class="conv ${current ? "current" : ""}">
+      <button class="conv-open" @click=${() => this._openConversation(c)}>
+        <div class="conv-title">${c.title || "Untitled"}</div>
+        <div class="conv-meta">
+          ${c.mine ? nothing : html`<span class="conv-who">${c.user_name || "Someone"}</span> · `}${whenText(
+            c.updated,
+          )}
+          · ${Math.ceil(c.count / 2)} ${c.count > 2 ? "questions" : "question"}${current ? " · open now" : ""}
+        </div>
+      </button>
+      ${confirming
+        ? html`<button class="pill danger" @click=${() => this._delete(c)}>Delete</button>`
+        : html`<button
+            class="icon small"
+            title="Delete"
+            aria-label="Delete ${c.title}"
+            @click=${() => (this._confirmDelete = c.id)}
+          >
+            <ha-icon icon="mdi:delete-outline"></ha-icon>
+          </button>`}
+    </div>`;
+  }
+
+  private readonly _openHistory = () => {
+    this._historyOpen = true;
+    this._confirmDelete = null;
+    void this._loadHistory(this._historyEveryone);
+  };
+
+  private async _loadHistory(everyone: boolean): Promise<void> {
+    this._historyEveryone = everyone;
+    this._history = null;
+    this._historyError = "";
+    this._confirmDelete = null;
+    try {
+      this._history = await listConversations(this.hass, everyone);
+    } catch (err: any) {
+      this._historyError =
+        err?.code === "unknown_command"
+          ? "The history needs a newer version of the Kattio integration."
+          : err?.message || "The conversations could not be loaded.";
+    }
+  }
+
+  private async _openConversation(c: ConversationSummary): Promise<void> {
+    if (this._busy) return;
+    this._confirmDelete = null;
+    let stored;
+    try {
+      stored = await getConversation(this.hass, c.id);
+    } catch (err: any) {
+      this._historyError = err?.message || "The conversation could not be opened.";
+      return;
+    }
+    if (!stored) {
+      this._historyError = "That conversation is gone.";
+      return;
+    }
+    this._historyOpen = false;
+    if (!stored.mine) {
+      // someone else's: read it; one's own waits aside
+      if (!this._readOnly) this._ownAside = { messages: this._messages, conversationId: this._conversationId };
+      this._readOnly = { name: stored.user_name };
+      this._show({ conversationId: null, messages: stored.messages });
+      return;
+    }
+    this._readOnly = null;
+    this._ownAside = undefined;
+    this._show({ conversationId: stored.id, messages: stored.messages });
+    this._save(false);
+  }
+
+  private readonly _leaveReadOnly = () => {
+    const own = this._ownAside;
+    this._readOnly = null;
+    this._ownAside = undefined;
+    this._messages = own?.messages ?? [];
+    this._conversationId = own?.conversationId ?? null;
+    this._follow = true;
+    this._behind = false;
+  };
+
+  private async _delete(c: ConversationSummary): Promise<void> {
+    this._confirmDelete = null;
+    try {
+      await deleteConversation(this.hass, c.id);
+    } catch (err: any) {
+      this._historyError = err?.message || "The conversation could not be deleted.";
+      return;
+    }
+    this._history = (this._history ?? []).filter((x) => x.id !== c.id);
+    // the open one: it stays on the screen, but is no longer kept or continued
+    if (c.id === this._conversationId && !this._readOnly) this._newConversation();
+  }
+
   private _set<K extends keyof Settings>(key: K, value: Settings[K]): void {
     this._settings = { ...this._settings, [key]: value };
     saveSettings(this._settings);
@@ -302,7 +617,9 @@ class KattioPanel extends LitElement {
   };
 
   private readonly _onWindowKey = (e: KeyboardEvent) => {
-    if (e.key === "Escape" && this._settingsOpen) this._settingsOpen = false;
+    if (e.key !== "Escape") return;
+    if (this._settingsOpen) this._settingsOpen = false;
+    else if (this._historyOpen) this._historyOpen = false;
   };
 
   private _onKey(e: KeyboardEvent): void {
@@ -319,7 +636,8 @@ class KattioPanel extends LitElement {
     this._busy = true;
     const reply: Message = { id: nextId++, role: "assistant", text: "", pending: true };
     this._smooth = true;
-    this._stick = true;
+    this._follow = true;
+    this._behind = false;
     this._messages = [...this._messages, { id: nextId++, role: "user", text }, reply];
     this._face?.setState("thinking");
 
@@ -355,41 +673,246 @@ class KattioPanel extends LitElement {
     this._save();
   }
 
+  private readonly _onSpeak = () => {
+    if (this._voicePhase === "off") void this._askByVoice();
+    else if (this._voicePhase === "listening") this._voice?.stopListening();
+    else this._voice?.cancel();
+  };
+
+  /** One question by voice: what was heard, then the answer as text and out loud */
+  private async _askByVoice(): Promise<void> {
+    if (this._busy || !this.hass) return;
+    this._busy = true;
+    this._voicePhase = "starting";
+    const heard: Message = { id: nextId++, role: "user", text: "", pending: true };
+    const reply: Message = { id: nextId++, role: "assistant", text: "", pending: true };
+    let replyShown = false;
+    let speaking = false;
+    let failed = false;
+    this._smooth = true;
+    this._follow = true;
+    this._behind = false;
+    this._messages = [...this._messages, heard];
+    this._face?.setState("listening");
+
+    const refresh = () => (this._messages = [...this._messages]);
+    const showReply = () => {
+      if (replyShown) return;
+      replyShown = true;
+      this._messages = [...this._messages, reply];
+    };
+    const turn = askVoice(
+      this.hass,
+      { pipeline: this._config.pipeline, conversationId: this._conversationId },
+      {
+        onListening: () => (this._voicePhase = "listening"),
+        onHeard: (text) => {
+          if (!text) {
+            this._messages = [
+              ...this._messages.filter((m) => m !== heard),
+              { id: nextId++, role: "note", text: "I didn't catch that." },
+            ];
+            this._face?.setState("idle");
+            return;
+          }
+          heard.text = text;
+          heard.pending = false;
+          this._voicePhase = "thinking";
+          this._face?.setState("thinking");
+          showReply();
+          refresh();
+        },
+        onText: (more, newMessage) => {
+          showReply();
+          reply.text += (newMessage && reply.text ? "\n\n" : "") + more;
+          refresh();
+        },
+        onDone: ({ speech, conversationId }) => {
+          showReply();
+          if (!reply.text.trim()) reply.text = speech;
+          reply.pending = false;
+          this._conversationId = conversationId ?? this._conversationId;
+          if (!speaking) this._face?.setState("idle");
+          refresh();
+        },
+        onError: (message) => {
+          failed = true;
+          this._messages = [
+            ...this._messages.filter((m) => (m !== heard && m !== reply) || m.text),
+            { id: nextId++, role: "error", text: message },
+          ];
+          this._face?.setState("error");
+        },
+        onSpeaking: (on) => {
+          speaking = on;
+          if (on) {
+            this._voicePhase = "speaking";
+            this._face?.setState("speaking");
+          } else if (!failed) {
+            this._face?.setState(reply.pending ? "thinking" : "idle");
+          }
+        },
+        onLevel: (level) => this._face?.setLevel(level),
+      },
+    );
+    this._voice = turn;
+    await turn.done;
+    this._voice = undefined;
+    // stopped early: what was on its way stays out
+    const stopped = heard.pending || reply.pending;
+    this._messages = this._messages
+      .filter((m) => !m.pending || m.text)
+      .map((m) => (m.pending ? { ...m, pending: false } : m));
+    if (stopped && heard.text && !failed) {
+      this._messages = [...this._messages, { id: nextId++, role: "note", text: "Stopped." }];
+    }
+    if (!failed) this._face?.setState("idle");
+    this._voicePhase = "off";
+    this._busy = false;
+    this._save();
+  }
+
   private _newConversation(): void {
+    this._readOnly = null;
+    this._ownAside = undefined;
     this._messages = [];
+    this._follow = true;
+    this._behind = false;
     this._conversationId = null;
     this._face?.setState("idle");
     this._save();
   }
 
-  private _scrollToEnd(smooth: boolean): void {
-    const box = this.renderRoot.querySelector<HTMLElement>(".messages");
-    if (box) box.scrollTo({ top: box.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  private get _log(): HTMLElement | null {
+    return this.renderRoot?.querySelector<HTMLElement>(".messages") ?? null;
   }
 
-  /** The conversation survives a reload of the page (this browser tab only) */
-  private _save(): void {
+  private _scrollToEnd(smooth: boolean): void {
+    const box = this._log;
+    if (!box) return;
+    if (box.scrollHeight - box.scrollTop - box.clientHeight < 1) return;
+    this._autoScroll = true;
+    box.scrollTo({ top: box.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  }
+
+  /** Back at the end: follow again. Away from it by the reader's own hand: stop following */
+  private readonly _onScroll = () => {
+    const box = this._log;
+    if (!box) return;
+    if (box.scrollHeight - box.scrollTop - box.clientHeight < END_PX) {
+      this._follow = true;
+      this._autoScroll = false;
+      this._behind = false;
+    } else if (!this._autoScroll) {
+      this._follow = false;
+    }
+  };
+
+  /** The reader takes over (a scroll the page started stops counting as the page's) */
+  private readonly _onReaderScroll = () => {
+    this._autoScroll = false;
+  };
+
+  /** Reading back: stop following right away (before new text can pull the view down again) */
+  private _readBack(): void {
+    this._autoScroll = false;
+    this._follow = false;
+  }
+
+  private readonly _onWheel = (e: WheelEvent) => {
+    if (e.deltaY < 0) this._readBack();
+    else this._autoScroll = false;
+  };
+
+  private readonly _onTouch = () => {
+    this._touching = true;
+    this._autoScroll = false;
+  };
+
+  private readonly _onTouchEnd = () => {
+    this._touching = false;
+    this._onScroll();
+    if (this._follow) this._scrollToEnd(false);
+  };
+
+  private readonly _onLogKey = (e: KeyboardEvent) => {
+    if (["ArrowUp", "PageUp", "Home"].includes(e.key)) this._readBack();
+    else this._autoScroll = false;
+  };
+
+  private readonly _jump = () => {
+    this._follow = true;
+    this._behind = false;
+    this._scrollToEnd(true);
+  };
+
+  /**
+   * Keep the conversation: for a reload of this tab, as this device's last one, and (with the history on) in Home
+   * Assistant. `remote` false: only on this device (it came from Home Assistant just now).
+   */
+  private _save(remote = true): void {
+    if (this._readOnly) return;
+    const userId = this.hass?.user?.id ?? "";
+    const messages = this._messages
+      .filter((m) => !m.pending)
+      .slice(-KEEP_MESSAGES)
+      .map(({ role, text }) => ({ role, text }));
+    const conversation: SavedConversation = { conversationId: this._conversationId, messages };
     try {
-      const messages = this._messages
-        .filter((m) => !m.pending)
-        .slice(-KEEP_MESSAGES)
-        .map(({ role, text }) => ({ role, text }));
-      sessionStorage.setItem(STORE_KEY, JSON.stringify({ conversationId: this._conversationId, messages }));
+      sessionStorage.setItem(STORE_KEY, JSON.stringify({ userId, ...conversation }));
     } catch {
       // storage unavailable: the conversation just isn't kept
     }
+    if (!userId) return;
+    saveLast(userId, conversation);
+    if (remote && this._settings.history && this._conversationId && messages.length) {
+      saveConversation(this.hass, this._conversationId, messages).catch((err) =>
+        console.warn("Kattio: the conversation was not kept in Home Assistant", err),
+      );
+    }
   }
 
-  private _restore(): void {
+  /**
+   * What the page shows when it opens: this tab's conversation (a reload, or back from another page); else, if
+   * set, the most recent conversation (this user's from any device, or this device's last); else a new one.
+   */
+  private async _start(): Promise<void> {
+    const userId = this.hass.user!.id;
     try {
-      const saved = JSON.parse(sessionStorage.getItem(STORE_KEY) || "null");
-      if (saved && Array.isArray(saved.messages)) {
-        this._messages = saved.messages.map((m: Message) => ({ id: nextId++, role: m.role, text: m.text }));
-        this._conversationId = saved.conversationId ?? null;
+      const tab = JSON.parse(sessionStorage.getItem(STORE_KEY) || "null");
+      if (tab && tab.userId === userId && Array.isArray(tab.messages)) {
+        this._show(tab);
+        return;
       }
     } catch {
       // nothing kept
     }
+    const s = this._settings;
+    if (!s.resume) return;
+    if (s.resumeAnyDevice && s.history) {
+      try {
+        const latest = await getConversation(this.hass);
+        if (latest?.mine && !this._messages.length) {
+          this._show({ conversationId: latest.id, messages: latest.messages });
+          this._save(false);
+        }
+        return;
+      } catch (err) {
+        console.warn("Kattio: the most recent conversation could not be loaded; this device's last instead", err);
+      }
+    }
+    const last = loadLast(userId);
+    if (last && !this._messages.length) this._show(last);
+  }
+
+  private _show(conversation: SavedConversation): void {
+    this._messages = conversation.messages
+      .filter((m) => m && typeof m.text === "string" && ["user", "assistant", "note", "error"].includes(m.role))
+      .map((m) => ({ id: nextId++, role: m.role as Message["role"], text: m.text }));
+    this._conversationId = conversation.conversationId ?? null;
+    this._follow = true;
+    this._behind = false;
+    this._face?.setState("idle");
   }
 
   static styles = css`
@@ -515,6 +1038,13 @@ class KattioPanel extends LitElement {
     }
 
     /* ---- conversation ---- */
+    .log {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
     .messages {
       flex: 1;
       min-height: 0;
@@ -548,6 +1078,40 @@ class KattioPanel extends LitElement {
       font-weight: 500;
       margin-bottom: 2px;
     }
+    .empty-text {
+      white-space: pre-line;
+    }
+    .jump {
+      position: absolute;
+      left: 50%;
+      bottom: 8px;
+      z-index: 1;
+      width: 40px;
+      height: 40px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border: 1px solid var(--k-line);
+      border-radius: 50%;
+      background: var(--k-surface);
+      color: var(--k-accent);
+      box-shadow: var(--k-shadow);
+      cursor: pointer;
+      --mdc-icon-size: 22px;
+      transform: translateX(-50%);
+      animation: jump-in 0.2s ease-out;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .jump:active {
+      transform: translateX(-50%) scale(0.94);
+    }
+    @keyframes jump-in {
+      from {
+        opacity: 0;
+        transform: translate(-50%, 8px);
+      }
+    }
     .msg {
       max-width: min(82%, 600px);
       padding: 9px 14px;
@@ -569,6 +1133,12 @@ class KattioPanel extends LitElement {
       align-self: flex-start;
       background: var(--k-bubble);
       border-bottom-left-radius: 6px;
+    }
+    .msg.note {
+      align-self: center;
+      padding: 2px 12px;
+      font-size: 14px;
+      color: var(--k-muted);
     }
     .msg.error {
       align-self: center;
@@ -689,11 +1259,40 @@ class KattioPanel extends LitElement {
       color: var(--k-accent);
     }
     button.icon.speak {
+      position: relative;
       width: 48px;
       height: 48px;
       background: var(--k-surface);
       box-shadow: var(--k-shadow);
       border: 1px solid var(--k-line);
+    }
+    button.icon.speak:not(.off) {
+      background: var(--k-accent);
+      color: var(--k-on-accent);
+      border-color: transparent;
+    }
+    button.icon.speak:not(.off):hover {
+      background: color-mix(in srgb, var(--k-accent) 88%, #000);
+    }
+    /* listening: a ring breathes out from the button */
+    button.icon.speak.listening::after {
+      content: "";
+      position: absolute;
+      inset: -1px;
+      border-radius: 50%;
+      border: 2px solid var(--k-accent);
+      animation: ring 1.4s ease-out infinite;
+      pointer-events: none;
+    }
+    @keyframes ring {
+      from {
+        transform: scale(1);
+        opacity: 0.7;
+      }
+      to {
+        transform: scale(1.5);
+        opacity: 0;
+      }
     }
     button:focus-visible {
       outline: 2px solid var(--k-accent);
@@ -775,6 +1374,31 @@ class KattioPanel extends LitElement {
     .toggle .note {
       margin-top: 0;
     }
+    label.label {
+      display: block;
+    }
+    textarea {
+      box-sizing: border-box;
+      display: block;
+      width: 100%;
+      min-height: 64px;
+      resize: vertical;
+      padding: 10px 12px;
+      border: 1px solid var(--k-line);
+      border-radius: 12px;
+      background: var(--k-bg);
+      color: inherit;
+      font: inherit;
+      font-size: 16px;
+      line-height: 1.4;
+      outline: none;
+    }
+    textarea:focus {
+      border-color: color-mix(in srgb, var(--k-accent) 60%, transparent);
+    }
+    textarea::placeholder {
+      color: var(--k-muted);
+    }
     .choices {
       display: flex;
       padding: 3px;
@@ -835,6 +1459,119 @@ class KattioPanel extends LitElement {
     input[type="checkbox"][role="switch"]:disabled {
       opacity: 0.4;
     }
+    .setting.sub {
+      padding-left: 16px;
+    }
+    .setting.sub.off .label,
+    .setting.sub.off .note {
+      opacity: 0.5;
+    }
+    .setting.sub {
+      border-top: none;
+      padding-top: 0;
+    }
+
+    /* ---- conversations ---- */
+    .sheet.history {
+      display: flex;
+      flex-direction: column;
+    }
+    :host([wide]) .sheet.history {
+      width: min(520px, 90%);
+      max-height: 80%;
+    }
+    .sheet.history .choices {
+      flex: none;
+      margin-bottom: 8px;
+    }
+    .convs {
+      flex: 1;
+      min-height: 120px;
+      overflow-y: auto;
+      margin: 0 -8px;
+    }
+    .conv {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      border-radius: 12px;
+      padding-right: 4px;
+    }
+    .conv.current {
+      background: color-mix(in srgb, var(--k-accent) 12%, transparent);
+    }
+    .conv-open {
+      flex: 1;
+      min-width: 0;
+      padding: 10px 8px;
+      border: none;
+      background: none;
+      color: inherit;
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      border-radius: 12px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .conv-open:hover {
+      background: color-mix(in srgb, currentColor 6%, transparent);
+    }
+    .conv-title {
+      font-size: 15px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .conv-meta {
+      margin-top: 2px;
+      font-size: 13px;
+      color: var(--k-muted);
+    }
+    .conv-who {
+      color: var(--k-text);
+      font-weight: 500;
+    }
+    .conv-empty {
+      padding: 24px 8px;
+      text-align: center;
+      color: var(--k-muted);
+    }
+    .pill {
+      flex: none;
+      height: 34px;
+      padding: 0 14px;
+      border: 1px solid var(--k-line);
+      border-radius: 17px;
+      background: var(--k-surface);
+      color: var(--k-accent);
+      font: inherit;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    .pill.danger {
+      border-color: transparent;
+      background: var(--k-error);
+      color: #fff;
+    }
+    .readonly {
+      flex: none;
+      box-sizing: border-box;
+      width: 100%;
+      max-width: 792px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 16px calc(14px + env(safe-area-inset-bottom, 0px));
+      color: var(--k-muted);
+      font-size: 14px;
+      --mdc-icon-size: 20px;
+    }
+    .readonly-text {
+      flex: 1;
+      min-width: 0;
+    }
     .sheet-foot {
       padding-top: 12px;
       border-top: 1px solid var(--k-line);
@@ -867,7 +1604,9 @@ class KattioPanel extends LitElement {
     @media (prefers-reduced-motion: reduce) {
       .msg,
       .sheet,
-      .scrim {
+      .scrim,
+      .jump,
+      button.icon.speak.listening::after {
         animation: none;
       }
     }

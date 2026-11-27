@@ -1,10 +1,19 @@
 {
   "domain": "kattio",
   "name": "Kattio",
-  "after_dependencies": ["assist_pipeline"],
-  "codeowners": ["@anderslaub"],
+  "after_dependencies": [
+    "assist_pipeline"
+  ],
+  "codeowners": [
+    "@anderslaub"
+  ],
   "config_flow": true,
-  "dependencies": ["frontend", "http", "panel_custom"],
+  "dependencies": [
+    "frontend",
+    "http",
+    "panel_custom",
+    "websocket_api"
+  ],
   "documentation": "https://github.com/anderslaub/kattio-va",
   "integration_type": "service",
   "iot_class": "local_push",

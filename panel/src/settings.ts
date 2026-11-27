@@ -12,11 +12,27 @@ export interface Settings {
   start: StartMode;
   /** Keep the screen on while the page is open */
   keepAwake: boolean;
+  /** Shown before the conversation starts; the first line large. Empty: the page's own greeting */
+  greeting: string;
+  /** Conversations are kept (in Home Assistant, per user) and listed for picking up again */
+  history: boolean;
+  /** When the page opens: continue the most recent conversation (else a new one) */
+  resume: boolean;
+  /** ... the user's most recent from any device (needs the history), else the last one on this device */
+  resumeAnyDevice: boolean;
 }
 
-export const DEFAULT_SETTINGS: Settings = { theme: "auto", start: "text", keepAwake: false };
+export const DEFAULT_SETTINGS: Settings = { theme: "auto", start: "text", keepAwake: false, greeting: "",
+  history: true,
+  resume: false,
+  resumeAnyDevice: false,
+};
+/** Longest greeting kept */
+export const GREETING_MAX = 300;
 
 const KEY = "kattio-panel:settings:v1";
+
+const bool = (value: unknown, fallback: boolean): boolean => (typeof value === "boolean" ? value : fallback);
 
 export function loadSettings(): Settings {
   try {
@@ -25,7 +41,11 @@ export function loadSettings(): Settings {
       return {
         theme: ["auto", "light", "dark"].includes(saved.theme) ? saved.theme : DEFAULT_SETTINGS.theme,
         start: ["text", "speak"].includes(saved.start) ? saved.start : DEFAULT_SETTINGS.start,
-        keepAwake: typeof saved.keepAwake === "boolean" ? saved.keepAwake : DEFAULT_SETTINGS.keepAwake,
+        keepAwake: bool(saved.keepAwake, DEFAULT_SETTINGS.keepAwake),
+        greeting: typeof saved.greeting === "string" ? saved.greeting.slice(0, GREETING_MAX) : DEFAULT_SETTINGS.greeting,
+        history: bool(saved.history, DEFAULT_SETTINGS.history),
+        resume: bool(saved.resume, DEFAULT_SETTINGS.resume),
+        resumeAnyDevice: bool(saved.resumeAnyDevice, DEFAULT_SETTINGS.resumeAnyDevice),
       };
     }
   } catch {
@@ -87,5 +107,34 @@ export class ScreenAwake {
     } catch {
       // refused (battery saver, or not allowed here): the screen goes dark as usual
     }
+  }
+}
+
+/** A conversation as the page keeps it */
+export interface SavedConversation {
+  conversationId: string | null;
+  messages: { role: string; text: string }[];
+}
+
+const LAST_KEY = "kattio-panel:last:v1";
+
+/** The last conversation on this device, for whichever Home Assistant user had it (a shared tablet changes hands) */
+export function loadLast(userId: string): SavedConversation | null {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAST_KEY) || "null");
+    if (saved && saved.userId === userId && Array.isArray(saved.messages)) {
+      return { conversationId: saved.conversationId ?? null, messages: saved.messages };
+    }
+  } catch {
+    // nothing kept
+  }
+  return null;
+}
+
+export function saveLast(userId: string, conversation: SavedConversation): void {
+  try {
+    localStorage.setItem(LAST_KEY, JSON.stringify({ userId, ...conversation }));
+  } catch {
+    // not kept
   }
 }
