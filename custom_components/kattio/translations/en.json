@@ -1,0 +1,42 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Kattio panel",
+        "description": "Adds a page to the sidebar (and the Home Assistant apps) where you can talk to your assistant. You can change all of this later under Configure.",
+        "data": {
+          "title": "Title",
+          "icon": "Icon",
+          "pipeline": "Assist pipeline",
+          "users": "Who may use it"
+        },
+        "data_description": {
+          "title": "Shown in the sidebar and at the top of the page",
+          "pipeline": "The assistant the page talks to: its conversation agent (and later its speech-to-text and text-to-speech). Empty: the preferred pipeline.",
+          "users": "Empty: everyone with a Home Assistant login"
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "The Kattio panel is already set up. Change it under Configure."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Kattio panel",
+        "data": {
+          "title": "Title",
+          "icon": "Icon",
+          "pipeline": "Assist pipeline",
+          "users": "Who may use it"
+        },
+        "data_description": {
+          "title": "Shown in the sidebar and at the top of the page",
+          "pipeline": "The assistant the page talks to: its conversation agent (and later its speech-to-text and text-to-speech). Empty: the preferred pipeline.",
+          "users": "Empty: everyone with a Home Assistant login"
+        }
+      }
+    }
+  }
+}

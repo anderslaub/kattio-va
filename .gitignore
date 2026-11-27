@@ -4,3 +4,5 @@ secrets.yaml
 backup/
 **/*.log
 
+panel/node_modules/
+.pytest_cache/
