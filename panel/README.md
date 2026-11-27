@@ -74,6 +74,7 @@ Coming next: a wake word for a wall tablet (Speak mode), then attachments and th
 | `custom_components/kattio/` | The Home Assistant integration: adds the panel, holds its settings |
 | `custom_components/kattio/history.py` | Each user's conversation history, and the `kattio/history/*` websocket commands |
 | `custom_components/kattio/voice.py` | Relays a spoken conversation's microphone to the turn detection server (`kattio/voice/stream`) |
+| `custom_components/kattio/brand/` | The integration's icon (Kattio's listening face, light and dark); Home Assistant shows a custom integration's own `brand/` images |
 | `custom_components/kattio/www/` | The built page (committed: Home Assistant installs from git) |
 
 The page and the integration don't depend on anything else in this repository. To remove the panel, delete
