@@ -30,8 +30,8 @@ interface Engine {
   face_set_level(level: number): void;
   face_poke(): number;
   face_update(dt: number): number;
-  face_render(): void;
-  face_background(): number;
+  face_render(dark: number): void;
+  face_glow(dark: number): number;
 }
 
 let engineModule: Promise<WebAssembly.Module> | undefined;
@@ -81,12 +81,14 @@ export function kattioFace(fallback: FaceFactory): FaceFactory {
     canvas.setAttribute("role", "img");
     canvas.setAttribute("aria-label", "Kattio");
     host.append(canvas);
-    const ctx = canvas.getContext("2d", { alpha: false });
+    const ctx = canvas.getContext("2d");
 
     let engine: Engine | undefined;
     let other: Face | undefined; // the fallback, if the engine could not load
     let destroyed = false;
     let state: FaceState = "idle";
+    let dark = false;
+    let glow = -1;
     let level = 0;
     let ptr = 0;
     let frame = 0;
@@ -114,12 +116,16 @@ export function kattioFace(fallback: FaceFactory): FaceFactory {
 
     const draw = () => {
       if (!engine || !ctx || !ptr) return;
-      engine.face_render();
+      engine.face_render(dark ? 1 : 0);
       // a fresh view each time: the engine's memory may have grown (and the old view gone)
       const pixels = new Uint8ClampedArray(engine.memory.buffer, ptr, canvas.width * canvas.height * 4);
       ctx.putImageData(new ImageData(pixels, canvas.width, canvas.height), 0, 0);
-      const bg = engine.face_background();
-      host.style.backgroundColor = `#${bg.toString(16).padStart(6, "0")}`;
+      // the mood's colour as a soft glow behind the face (the page's own background around it)
+      const colour = engine.face_glow(dark ? 1 : 0);
+      if (colour !== glow) {
+        glow = colour;
+        host.style.setProperty("--face-glow", `#${colour.toString(16).padStart(6, "0")}`);
+      }
     };
 
     const tick = (now: number) => {
@@ -180,6 +186,13 @@ export function kattioFace(fallback: FaceFactory): FaceFactory {
         if (other) return other.setLevel(value);
         level = Math.max(level, Math.min(1, Math.max(0, value)));
       },
+      setDark(value) {
+        if (other) return other.setDark(value);
+        if (value === dark) return;
+        dark = value;
+        glow = -1;
+        lastDraw = 0;
+      },
       destroy() {
         destroyed = true;
         cancelAnimationFrame(frame);
@@ -187,7 +200,7 @@ export function kattioFace(fallback: FaceFactory): FaceFactory {
         canvas.removeEventListener("click", pet);
         other?.destroy();
         host.replaceChildren();
-        host.style.backgroundColor = "";
+        host.style.removeProperty("--face-glow");
       },
     };
   };

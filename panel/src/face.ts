@@ -9,6 +9,8 @@ export interface Face {
   setState(state: FaceState): void;
   /** How loud the assistant's voice is right now (0..1), for lip-sync while it speaks */
   setLevel(level: number): void;
+  /** The page is dark (or light): colours to suit */
+  setDark(dark: boolean): void;
   /** Stop animating and let go of anything held */
   destroy(): void;
 }
@@ -41,6 +43,7 @@ export const placeholderFace: FaceFactory = (host) => {
       status.textContent = words[state];
     },
     setLevel() {},
+    setDark() {},
     destroy() {
       host.replaceChildren();
     },

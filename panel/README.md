@@ -3,8 +3,20 @@
 Kattio's page in Home Assistant: in the sidebar, and in the Home Assistant apps on Android and iPhone. The face is
 on the top half; the conversation and the input are below.
 
-It always opens in **text mode**: nothing is said out loud and the microphone stays off. Requests go through an
-Assist pipeline (the same way the voice satellites go), with only the conversation step used.
+On a phone the face sits on the top third, with the conversation below. On a wide screen (a tablet on its side,
+a desktop) the face is on the left and the conversation on the right. It follows Home Assistant's light or dark
+theme; in the dark, Kattio's lines turn light. The background shows through, and the mood's colour glows softly
+behind the face.
+
+Requests go through an Assist pipeline (the same way the voice satellites go), with only the conversation step
+used.
+
+**Settings on this device** (the gear; kept in this browser only, so a phone and a wall tablet can differ):
+
+- **Appearance:** Auto (follows Home Assistant), Light or Dark.
+- **Start in:** Text or Speak. Text means nothing is said out loud and the microphone stays off. Speak comes with
+  Speak mode; until then the page opens in text mode.
+- **Keep the screen on:** while the page is open (Wake Lock; most browsers have it).
 
 The face is the box's own: the firmware's face engine (`components/kattio_face/face_engine.cpp`, unchanged), built
 as WebAssembly and drawn at the phone's resolution. Tap it to pet the cat.
@@ -18,6 +30,7 @@ camera.
 |---|---|
 | `panel/src/` | The page (TypeScript, Lit) |
 | `panel/src/face.ts` | The face interface. The page only gives a face the state and the voice level, so a face can be swapped |
+| `panel/src/settings.ts` | The per-device settings, and keeping the screen on |
 | `panel/src/kattio-face.ts` | Kattio's face on a canvas (falls back to a plain icon where WebAssembly can't run) |
 | `panel/face/` | The WebAssembly wrapper around the firmware's face engine, and its build script |
 | `custom_components/kattio/` | The Home Assistant integration: adds the panel, holds its settings |
