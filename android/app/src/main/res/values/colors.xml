@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <color name="background">#FAFAFA</color>
+  <color name="text">#1C1D20</color>
+  <color name="text_dim">#5F6368</color>
+  <color name="error">#C62828</color>
+  <color name="launcher_background">#FFFFFF</color>
+</resources>

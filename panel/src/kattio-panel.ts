@@ -8,6 +8,7 @@
  * a spoken conversation, as with a box (talk.ts). A wake word (Speak mode, for a tablet on the wall) comes later. Settings are per device: the gear in the top bar.
  */
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
+import { APP_TALK_EVENT, kattioApp } from "./app";
 import { askText, type Hass } from "./assist";
 import { placeholderFace, type Face, type FaceFactory } from "./face";
 import { kattioFace } from "./kattio-face";
@@ -117,6 +118,8 @@ class KattioPanel extends LitElement {
   private _voicePhase: VoicePhase = "off";
   /** The page has decided what to show first (needs hass: who the user is) */
   private _started = false;
+  /** What the page opens with is on screen (a spoken conversation the app asks for may start) */
+  private _opened = false;
   private _historyOpen = false;
   /** The list in the history sheet; null while it loads */
   private _history: ConversationSummary[] | null = null;
@@ -157,6 +160,7 @@ class KattioPanel extends LitElement {
     this._settings = loadSettings();
     this._resize.observe(this);
     window.addEventListener("keydown", this._onWindowKey);
+    window.addEventListener(APP_TALK_EVENT, this._appTalk);
     window.addEventListener("resize", this._fitHeight);
     window.visualViewport?.addEventListener("resize", this._fitHeight);
     requestAnimationFrame(this._fitHeight);
@@ -169,6 +173,7 @@ class KattioPanel extends LitElement {
     this._observedLog = undefined;
     this._talk?.stop();
     window.removeEventListener("keydown", this._onWindowKey);
+    window.removeEventListener(APP_TALK_EVENT, this._appTalk);
     window.removeEventListener("resize", this._fitHeight);
     window.visualViewport?.removeEventListener("resize", this._fitHeight);
     this._awake.set(false);
@@ -179,7 +184,10 @@ class KattioPanel extends LitElement {
   protected willUpdate(changed: PropertyValues): void {
     if (!this._started && this.hass?.user?.id) {
       this._started = true;
-      void this._start();
+      void this._start().finally(() => {
+        this._opened = true;
+        this._appTalk();
+      });
     }
     if (changed.has("hass") || changed.has("_settings")) {
       const theme = this._settings.theme;
@@ -213,7 +221,11 @@ class KattioPanel extends LitElement {
       this._face.destroy();
       this._face = undefined;
     }
-    if (changed.has("_dark")) this._face?.setDark(this._dark);
+    if (changed.has("_dark")) {
+      this._face?.setDark(this._dark);
+      // in the Kattio app: the phone's bars around the page in the page's colours
+      kattioApp()?.setTheme?.(this._dark, getComputedStyle(this).backgroundColor);
+    }
   }
 
   render() {
@@ -678,6 +690,16 @@ class KattioPanel extends LitElement {
     this._busy = false;
     this._save();
   }
+
+  /**
+   * In the Kattio app (android/), as the phone's assistant: the assistant gesture opens the page straight into a
+   * spoken conversation (the app asks once; the page takes it once it is ready)
+   */
+  private readonly _appTalk = () => {
+    if (!this._opened || this._readOnly || !this._allowed) return;
+    if (!kattioApp()?.takeTalkRequest?.()) return;
+    if (this._voicePhase === "off") this._startTalk();
+  };
 
   private readonly _onSpeak = () => {
     if (this._voicePhase === "off") this._startTalk();

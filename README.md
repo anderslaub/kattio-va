@@ -16,6 +16,8 @@ components/kattio_face/
 wakewords/<name>/latest.*       models as delivered by training ("hey_kattio", "okay_kattio")
 wakewords/<name>/esphome/       what the firmware loads; regenerate with tools/sync_wakewords.py
 tools/preview.cpp               renders a storyboard of all moods to frames on a PC
+custom_components/kattio/, panel/   Kattio's page in Home Assistant (see panel/README.md)
+android/                        Kattio app: phone assistant + Android Auto screen (see android/README.md)
 kattio-face-preview.mp4         output of the above
 backup/old_firmware_full.bin    full 16 MB flash dump of the previous firmware (ESPHome 2025.7.3)
 ```

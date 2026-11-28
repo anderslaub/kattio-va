@@ -2,6 +2,8 @@
  * Settings for this device only (a phone in a pocket and a tablet on the wall want different things), kept in the
  * browser's local storage. Without storage (a private window, cleared site data) the defaults apply.
  */
+import { kattioApp } from "./app";
+
 export type ThemeSetting = "auto" | "light" | "dark";
 export type StartMode = "text" | "speak";
 
@@ -76,12 +78,15 @@ export class ScreenAwake {
   };
 
   static get supported(): boolean {
-    return "wakeLock" in navigator;
+    return "wakeLock" in navigator || !!kattioApp()?.keepScreenOn;
   }
 
   set(wanted: boolean): void {
     if (wanted === this.wanted) return;
     this.wanted = wanted;
+    // in the Kattio app, the app keeps the screen on
+    const app = kattioApp();
+    if (app?.keepScreenOn) return app.keepScreenOn(wanted);
     if (wanted) {
       document.addEventListener("visibilitychange", this.onVisible);
       void this.acquire();

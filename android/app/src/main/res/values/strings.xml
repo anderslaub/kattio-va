@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="app_name">Kattio</string>
+  <string name="login_title">Kattio</string>
+  <string name="login_text">Your Home Assistant\'s address. Kattio uses the Kattio integration there, and you log in on Home Assistant\'s own page.</string>
+  <string name="login_hint">https://homeassistant.local:8123</string>
+  <string name="login_button">Log in</string>
+  <string name="login_bad_address">That isn\'t an address. Write it as in the browser, e.g. https://homeassistant.local:8123</string>
+  <string name="login_unreachable">Home Assistant can\'t be reached: %1$s</string>
+  <string name="login_failed">The login failed. Try again.</string>
+  <string name="settings_text">Connected to %1$s.\n\nKattio can be the phone\'s digital assistant: Settings › Apps › Default apps › Digital assistant app.</string>
+  <string name="settings_close">Close</string>
+  <string name="settings_logout">Log out</string>
+  <string name="car_talk">Talk</string>
+  <string name="car_stop">Stop</string>
+</resources>

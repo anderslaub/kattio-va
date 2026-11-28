@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+  <!-- Android Auto: drawn on the map surface (only navigation apps may) -->
+  <uses-permission android:name="androidx.car.app.NAVIGATION_TEMPLATES" />
+  <uses-permission android:name="androidx.car.app.ACCESS_SURFACE" />
+
+  <application
+    android:label="@string/app_name"
+    android:icon="@mipmap/ic_launcher"
+    android:roundIcon="@mipmap/ic_launcher"
+    android:theme="@style/Theme.Kattio"
+    android:allowBackup="false"
+    android:usesCleartextTraffic="true"
+    android:supportsRtl="true">
+
+    <activity
+      android:name=".MainActivity"
+      android:exported="true"
+      android:launchMode="singleTask"
+      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density"
+      android:windowSoftInputMode="adjustResize">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+      </intent-filter>
+      <!-- the phone's digital assistant (Settings > Apps > Default apps > Digital assistant app) -->
+      <intent-filter>
+        <action android:name="android.intent.action.ASSIST" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+      <!-- a headset's button -->
+      <intent-filter>
+        <action android:name="android.intent.action.VOICE_COMMAND" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity>
+
+    <activity
+      android:name=".LoginActivity"
+      android:exported="false"
+      android:windowSoftInputMode="adjustResize" />
+
+    <service
+      android:name=".car.KattioCarService"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="androidx.car.app.CarAppService" />
+        <category android:name="androidx.car.app.category.NAVIGATION" />
+      </intent-filter>
+    </service>
+
+    <!-- the car's microphone needs car API level 5 (older cars: the phone's microphone) -->
+    <meta-data android:name="androidx.car.app.minCarApiLevel" android:value="1" />
+    <meta-data
+      android:name="com.google.android.gms.car.application"
+      android:resource="@xml/automotive_app_desc" />
+  </application>
+</manifest>

@@ -57,6 +57,10 @@ saved session, for as long as it keeps those (30 days by default).
 The face is the box's own: the firmware's face engine (`components/kattio_face/face_engine.cpp`, unchanged), built
 as WebAssembly and drawn at the phone's resolution. Tap it to pet the cat.
 
+**In the Kattio app** (`android/`, see its README) the page is the same. The app is the phone's digital assistant:
+the assistant gesture opens the page straight into a spoken conversation. The app also has a voice-only car screen
+(Android Auto).
+
 Coming next: a wake word for a wall tablet (Speak mode), then attachments and the camera.
 
 ## Parts
@@ -68,6 +72,7 @@ Coming next: a wake word for a wall tablet (Speak mode), then attachments and th
 | `panel/src/assist.ts` | A typed question through the Assist pipeline, and reading the reply from its events |
 | `panel/src/talk.ts` | A spoken conversation: the microphone to Home Assistant (and the turn detection), each answer played with its loudness for the face, listening again, interruptions |
 | `panel/src/history.ts` | The conversation history, through the integration's websocket commands |
+| `panel/src/app.ts` | In the Kattio app for Android (`android/`): starts a spoken conversation when the app asks (the assistant gesture), and leaves keeping the screen on and the bars' colours to the app |
 | `panel/src/settings.ts` | The per-device settings, and keeping the screen on |
 | `panel/src/kattio-face.ts` | Kattio's face on a canvas (falls back to a plain icon where WebAssembly can't run) |
 | `panel/face/` | The WebAssembly wrapper around the firmware's face engine, and its build script |
